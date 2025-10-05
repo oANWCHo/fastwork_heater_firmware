@@ -1,106 +1,130 @@
+/****************************************************
+ *  Project: ESP32 + MAX31855 + Rotary Encoder (PCNT) + ILI9341
+ *  Feature: แสดงค่าจาก encoder และ switch ตรงกลางจอ TFT
+ *           พื้นหลังสีดำ ตัวอักษรสีส้ม แยกคนละบรรทัด
+ ****************************************************/
+
+// ========== [1) Include Libraries] ==========
 #include <SPI.h>
 #include "Adafruit_MAX31855.h"
-#include "driver/pcnt.h" // Required for the ESP32 Pulse Counter
+#include "driver/pcnt.h"          // ESP32 Pulse Counter (PCNT) สำหรับอ่าน Rotary Encoder
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
 
-// Define pins for thermocouple
-//#define MAXDO     19
-//#define MAXCS     5
-//#define MAXCLK    18
-
-#define MAXDO     12 //Same with TFT_MISO
+// ========== [2) Pin Definitions] ==========
+// --- MAX31855 Thermocouple ---
+#define MAXDO     12   // (แชร์กับ TFT_MISO)
 #define MAXCS     25
-#define MAXCLK    14 //Same with TFT_MISO
-// Define the pin for the relay
+#define MAXCLK    14   // (แชร์กับ TFT_CLK)
+
+// --- Relay Output ---
 #define RELAY_PIN 15
 
-// Define pins for the Rotary Encoder
-//#define ENCODER_A 25
-//#define ENCODER_B 26
-//#define ENCODER_SW 27
+// --- Rotary Encoder (ใช้ PCNT) ---
+#define ENCODER_A 36   // Data (Pulse)
+#define ENCODER_B 39   // CLK (Control)
+#define ENCODER_SW 34  // Push Switch
 
-#define ENCODER_A 36 //Data
-#define ENCODER_B 39 //CLK
-#define ENCODER_SW 34 //SW
-
-// For the Adafruit shield, these are the default.
-#define TFT_DC 27
-#define TFT_CS 26
+// --- TFT ILI9341 ---
+#define TFT_DC   27
+#define TFT_CS   26
 #define TFT_MOSI 13
 #define TFT_MISO 12
-#define TFT_CLK 14
-#define TFT_RST 4
+#define TFT_CLK  14
+#define TFT_RST  4
 
-// Initialize the Thermocouple
+// ========== [3) Objects Initialization] ==========
 Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
-Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
+Adafruit_ILI9341  tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 
-// Variable to track the encoder's value for printing
+// ========== [4) Global Variables] ==========
+// สำหรับ Serial monitor/ลอจิก
 long lastEncoderValue = 0;
-int lastSwitchState = HIGH; 
+int  lastSwitchState  = HIGH;
 
+// สำหรับค่าที่จะ "แสดงผลบนจอ"
+int16_t encoder_count_display = 0;  // mapping จากค่าที่อ่านได้จริง current_count
+int     switch_state_display  = HIGH;
+
+// สีส้มสำหรับตัวอักษรบนจอ
+uint16_t COLOR_ORANGE = 0;
+
+// ฟังก์ชันแสดงผลบนจอ (ประกาศล่วงหน้าเพื่อเรียกใช้ใน setup/loop ได้)
+unsigned long testText();
+
+// ========== [5) Setup] ==========
 void setup() {
   Serial.begin(115200);
-  while (!Serial) delay(1);
+  while (!Serial) { delay(1); }
 
-  // --- Encoder Setup using HARDWARE PULSE COUNTER ---
+  // --- 5.1 ตั้งค่า Switch ของ Encoder ---
   pinMode(ENCODER_SW, INPUT_PULLUP);
 
-  // 1. Configure the PCNT unit
+  // --- 5.2 ตั้งค่า PCNT สำหรับ Encoder ---
   pcnt_config_t pcnt_config = {};
-  pcnt_config.pulse_gpio_num = ENCODER_A;
-  pcnt_config.ctrl_gpio_num = ENCODER_B;
-  pcnt_config.channel = PCNT_CHANNEL_0;
-  pcnt_config.unit = PCNT_UNIT_0;
-  pcnt_config.pos_mode = PCNT_COUNT_DEC;
-  pcnt_config.neg_mode = PCNT_COUNT_INC;
-  pcnt_config.lctrl_mode = PCNT_MODE_REVERSE;
-  pcnt_config.hctrl_mode = PCNT_MODE_KEEP;
-
-  // 2. Initialize PCNT unit
+  pcnt_config.pulse_gpio_num = ENCODER_A;     // ช่องสัญญาณนับพัลส์
+  pcnt_config.ctrl_gpio_num  = ENCODER_B;     // ช่องสัญญาณ control (กำหนดทิศ)
+  pcnt_config.channel        = PCNT_CHANNEL_0;
+  pcnt_config.unit           = PCNT_UNIT_0;
+  pcnt_config.pos_mode       = PCNT_COUNT_DEC;   // ขอบขาขึ้นให้ DECREMENT
+  pcnt_config.neg_mode       = PCNT_COUNT_INC;   // ขอบขาลงให้ INCREMENT
+  pcnt_config.lctrl_mode     = PCNT_MODE_REVERSE;// เมื่อ control = LOW ให้ reverse
+  pcnt_config.hctrl_mode     = PCNT_MODE_KEEP;   // เมื่อ control = HIGH ให้ keep
   pcnt_unit_config(&pcnt_config);
 
-  // 3. Optional: Set a hardware filter to debounce the signal
+  // ฟิลเตอร์ฮาร์ดแวร์ (ดีบาวน์)
   pcnt_set_filter_value(PCNT_UNIT_0, 1000);
   pcnt_filter_enable(PCNT_UNIT_0);
 
-  // 4. Initialize and start the counter
+  // เริ่มตัวนับ
   pcnt_counter_pause(PCNT_UNIT_0);
   pcnt_counter_clear(PCNT_UNIT_0);
   pcnt_counter_resume(PCNT_UNIT_0);
-  // --- End of Encoder Setup ---
 
-  // --- Relay Setup ---
+  // --- 5.3 ตั้งค่า Relay ---
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
 
   Serial.println("MAX31855 & Hardware Encoder Test");
   Serial.println("Type 'ON' or 'OFF' to control the relay.");
 
-  // wait for MAX chip to stabilize
-  // delay(500);
-  // Serial.print("Initializing sensor...");
-  // if (!thermocouple.begin()) {
-  //   Serial.println("ERROR.");
-  //   while (1) delay(10);
-  // }
-  // Serial.println("DONE.");
-  
+  // --- 5.4 (ตัวอย่าง) MAX31855 เริ่มใช้งาน (คอมเมนต์ไว้หากยังไม่ได้ต่อจริง) ---
+  /*
+  delay(500);
+  Serial.print("Initializing sensor...");
+  if (!thermocouple.begin()) {
+    Serial.println("ERROR.");
+    while (1) delay(10);
+  }
+  Serial.println("DONE.");
+  */
+
+  // --- 5.5 ตั้งค่า TFT ---
   tft.begin();
-  tft.setRotation(0);
+  tft.setRotation(0);  // หมุนจอ 0 องศา (240x320)
+  tft.fillScreen(ILI9341_BLACK);
+
+  // กำหนดค่าสีส้ม (RGB 255,165,0)
+  COLOR_ORANGE = tft.color565(255, 165, 0);
+
+  // วาดครั้งแรก
   testText();
 }
 
+// ========== [6) Main Loop] ==========
 void loop() {
-  read_heater_input();
-  heater_read();
-  read_hardware_encoder(); 
-  check_encoder_switch();
-  delay(50); // Main loop delay
+  read_heater_input();   // รับคำสั่ง ON/OFF จาก Serial -> คุมรีเลย์
+  heater_read();         // อ่านอุณหภูมิจาก MAX31855 (ถ้าต่อใช้งาน)
+  read_hardware_encoder();// อ่านค่าพัลส์ encoder ผ่าน PCNT
+  check_encoder_switch(); // อ่านสถานะปุ่ม encoder
+
+  testText();             // อัปเดตจอเมื่อค่ามีการเปลี่ยน
+  delay(5);
 }
 
+// ========== [7) Heater / Thermocouple Section] ==========
 void heater_read() {
+  // อ่านอุณหภูมิแบบ Celsius (หากยังไม่ได้ต่อ IC จะได้ NAN)
   double c = thermocouple.readCelsius();
   Serial.print("C = ");
   Serial.println(c);
@@ -123,58 +147,115 @@ void read_heater_input() {
   }
 }
 
-// This function now reads the value directly from the PCNT hardware
+// ========== [8) Encoder (PCNT) Section] ==========
+// อ่านค่าจาก PCNT แล้วเก็บลง encoder_count_display เพื่อไปโชว์บนจอ
 void read_hardware_encoder() {
   int16_t current_count = 0;
   pcnt_get_counter_value(PCNT_UNIT_0, &current_count);
 
-  // Only print the value if it has changed
+  // อัปเดตค่าที่จะแสดงบนจอ
+  encoder_count_display = current_count;
+
+  // แสดงใน Serial เมื่อมีการเปลี่ยน
   if (current_count != lastEncoderValue) {
     Serial.print("Encoder Value: ");
     Serial.println(current_count);
-    lastEncoderValue = current_count; // Update the last known value
+    lastEncoderValue = current_count;
   }
 }
 
+// อ่านสถานะปุ่มของเอนโค้ดเดอร์ และอัปเดต switch_state_display เพื่อไปโชว์บนจอ
 void check_encoder_switch() {
   int currentSwitchState = digitalRead(ENCODER_SW);
 
-  // Check if the switch has just been pressed (gone from HIGH to LOW)
+  // อัปเดตค่าที่จะแสดงบนจอ
+  switch_state_display = currentSwitchState;
+
+  // ตรวจจับการกด (เปลี่ยนจาก HIGH -> LOW)
   if (lastSwitchState == HIGH && currentSwitchState == LOW) {
     Serial.println("Encoder Switch Pressed!");
-    
-    // --- You can add an action here! ---
-    // For example, reset the encoder count to zero on press:
-    
-    delay(50); // Simple debounce to prevent multiple triggers
+    // ตย. การทำงานเมื่อกดปุ่ม (เช่น reset counter)
+    // pcnt_counter_clear(PCNT_UNIT_0);
+
+    delay(50); // debounce ง่าย ๆ
   }
-  
-  // Update the last known state of the switch
+
   lastSwitchState = currentSwitchState;
 }
+
+// ========== [9) TFT Display Section] ==========
+// แสดงผล 2 บรรทัด: ENC: <count> และ SW: PRESSED/RELEASED
+// จัดวางให้อยู่กลางจอ พื้นดำ ตัวอักษรสีส้ม
+// ใช้ข้อความความยาวคงที่ + ไม่ fillRect/fillScreen ระหว่างอัปเดต
 unsigned long testText() {
-  tft.fillScreen(ILI9341_BLACK);
-  unsigned long start = micros();
-  tft.setCursor(0, 0);
-  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(1);
-  tft.println("Hello World!");
-  tft.setTextColor(ILI9341_YELLOW); tft.setTextSize(2);
-  tft.println(1234.56);
-  tft.setTextColor(ILI9341_RED);    tft.setTextSize(3);
-  tft.println(0xDEADBEEF, HEX);
-  tft.println();
-  tft.setTextColor(ILI9341_GREEN);
-  tft.setTextSize(5);
-  tft.println("Groop");
-  tft.setTextSize(2);
-  tft.println("I implore thee,");
-  tft.setTextSize(1);
-  tft.println("my foonting turlingdromes.");
-  tft.println("And hooptiously drangle me");
-  tft.println("with crinkly bindlewurdles,");
-  tft.println("Or I will rend thee");
-  tft.println("in the gobberwarts");
-  tft.println("with my blurglecruncheon,");
-  tft.println("see if I don't!");
-  return micros() - start;
+  static bool ui_inited = false;
+  static int yLine1, yLine2, xLine1, xLine2;
+  static int16_t prev_count  = INT16_MIN;
+  static int     prev_switch = -1;
+
+  // ---- ตั้งค่าฟอนต์/ระยะห่าง ----
+  const uint8_t TXT_SIZE = 3;
+  const int     GAP      = 8;
+
+  // ---- ใช้ "แม่แบบความยาวคงที่" เพื่อจัดกลางครั้งเดียว ----
+  // แม่แบบบรรทัด 1: fix ความกว้างเผื่อเลข 6 หลัก (รวมเครื่องหมาย)
+  const char* L1_TEMPLATE = "ENC: -123456";      // ยาวคงที่
+  // แม่แบบบรรทัด 2: เลือกอันที่ยาวสุด แล้วทำให้อีกอันยาวเท่ากันด้วยช่องว่าง
+  const char* L2_TEMPLATE = "SW: RELEASED";      // ยาวสุด
+
+  if (!ui_inited) {
+    tft.setTextWrap(false);
+    tft.setTextSize(TXT_SIZE);
+    tft.setTextColor(COLOR_ORANGE, ILI9341_BLACK); // วาดทับพร้อมพื้นหลังดำทุกตัวอักษร
+
+    // จัดกึ่งกลางแนวตั้งจากความสูงฟอนต์
+    const int CHAR_H = 8 * TXT_SIZE;
+    int screenH = tft.height();
+    int totalH  = CHAR_H + GAP + CHAR_H;
+    int yStart  = (screenH - totalH) / 2;
+    yLine1 = yStart;
+    yLine2 = yStart + CHAR_H + GAP;
+
+    // คำนวณ X กลาง "ครั้งเดียว" จากขนาดแม่แบบ (ความยาวคงที่)
+    int16_t bx, by; uint16_t bw, bh;
+    int screenW = tft.width();
+
+    tft.getTextBounds(L1_TEMPLATE, 0, 0, &bx, &by, &bw, &bh);
+    xLine1 = (screenW - (int)bw) / 2;
+
+    tft.getTextBounds(L2_TEMPLATE, 0, 0, &bx, &by, &bw, &bh);
+    xLine2 = (screenW - (int)bw) / 2;
+
+    ui_inited = true;
+  }
+
+  // อัปเดตเฉพาะเมื่อค่าจริงเปลี่ยน
+  if (encoder_count_display != prev_count || switch_state_display != prev_switch) {
+    prev_count  = encoder_count_display;
+    prev_switch = switch_state_display;
+
+    // ---------- บรรทัด 1: ใช้ความกว้างคงที่ ----------
+    // L1_TEMPLATE = "ENC: -123456" (ความยาวคงที่ 12 ตัว)
+    // ใช้รูปแบบกว้างคงที่ 7 หลักหลัง "ENC: " (รวมเครื่องหมาย)
+    char l1[16];
+    snprintf(l1, sizeof(l1), "ENC: %7d", (int)encoder_count_display); // รวมช่องว่างให้กว้างคงที่
+
+    // ---------- บรรทัด 2: ทำความยาวคงที่ให้เท่ากับ L2_TEMPLATE ----------
+    // L2_TEMPLATE = "SW: RELEASED" (ยาว 12)
+    char l2[16];
+    if (switch_state_display == LOW) {
+      // "SW: PRESSED" = 11 ตัว เพิ่มช่องว่างท้ายให้ครบ 12
+      strcpy(l2, "SW: PRESSED ");
+    } else {
+      strcpy(l2, "SW: RELEASED");
+    }
+
+    // ---------- วาดทับโดยไม่มีการ fill ใด ๆ ----------
+    tft.setCursor(xLine1, yLine1);
+    tft.print(l1);  // ความยาวคงที่ → พิมพ์ทับเคส 1 หลัก/2 หลักได้พอดี ไม่มีซ้อน
+
+    tft.setCursor(xLine2, yLine2);
+    tft.print(l2);  // ความยาวคงที่เท่ากันเสมอ → ไม่ต้องเคลียร์ก่อน
+  }
+  return 0;
 }
