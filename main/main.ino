@@ -1,15 +1,17 @@
 #include <SPI.h>
 #include "Adafruit_MAX31855.h"
 #include "driver/pcnt.h" // Required for the ESP32 Pulse Counter
+#include "Adafruit_GFX.h"
+#include "Adafruit_ILI9341.h"
 
 // Define pins for thermocouple
 //#define MAXDO     19
 //#define MAXCS     5
 //#define MAXCLK    18
 
-#define MAXDO     12
+#define MAXDO     12 //Same with TFT_MISO
 #define MAXCS     25
-#define MAXCLK    14
+#define MAXCLK    14 //Same with TFT_MISO
 // Define the pin for the relay
 #define RELAY_PIN 15
 
@@ -18,12 +20,21 @@
 //#define ENCODER_B 26
 //#define ENCODER_SW 27
 
-#define ENCODER_A 36
-#define ENCODER_B 39
-#define ENCODER_SW 34
+#define ENCODER_A 36 //Data
+#define ENCODER_B 39 //CLK
+#define ENCODER_SW 34 //SW
+
+// For the Adafruit shield, these are the default.
+#define TFT_DC 27
+#define TFT_CS 26
+#define TFT_MOSI 13
+#define TFT_MISO 12
+#define TFT_CLK 14
+#define TFT_RST 4
 
 // Initialize the Thermocouple
 Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 
 // Variable to track the encoder's value for printing
 long lastEncoderValue = 0;
@@ -68,13 +79,17 @@ void setup() {
   Serial.println("Type 'ON' or 'OFF' to control the relay.");
 
   // wait for MAX chip to stabilize
-  delay(500);
-  Serial.print("Initializing sensor...");
-  if (!thermocouple.begin()) {
-    Serial.println("ERROR.");
-    while (1) delay(10);
-  }
-  Serial.println("DONE.");
+  // delay(500);
+  // Serial.print("Initializing sensor...");
+  // if (!thermocouple.begin()) {
+  //   Serial.println("ERROR.");
+  //   while (1) delay(10);
+  // }
+  // Serial.println("DONE.");
+  
+  tft.begin();
+  tft.setRotation(0);
+  testText();
 }
 
 void loop() {
@@ -136,4 +151,30 @@ void check_encoder_switch() {
   
   // Update the last known state of the switch
   lastSwitchState = currentSwitchState;
+}
+unsigned long testText() {
+  tft.fillScreen(ILI9341_BLACK);
+  unsigned long start = micros();
+  tft.setCursor(0, 0);
+  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(1);
+  tft.println("Hello World!");
+  tft.setTextColor(ILI9341_YELLOW); tft.setTextSize(2);
+  tft.println(1234.56);
+  tft.setTextColor(ILI9341_RED);    tft.setTextSize(3);
+  tft.println(0xDEADBEEF, HEX);
+  tft.println();
+  tft.setTextColor(ILI9341_GREEN);
+  tft.setTextSize(5);
+  tft.println("Groop");
+  tft.setTextSize(2);
+  tft.println("I implore thee,");
+  tft.setTextSize(1);
+  tft.println("my foonting turlingdromes.");
+  tft.println("And hooptiously drangle me");
+  tft.println("with crinkly bindlewurdles,");
+  tft.println("Or I will rend thee");
+  tft.println("in the gobberwarts");
+  tft.println("with my blurglecruncheon,");
+  tft.println("see if I don't!");
+  return micros() - start;
 }
