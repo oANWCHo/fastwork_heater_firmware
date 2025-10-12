@@ -13,9 +13,9 @@
 
 // ========== [2) Pin Definitions] ==========
 // --- MAX31855 Thermocouple ---
-#define MAXDO     12   // (แชร์กับ TFT_MISO)
-#define MAXCS     25
-#define MAXCLK    14   // (แชร์กับ TFT_CLK)
+#define MAXDO     19   // (แชร์กับ TFT_MISO)
+#define MAXCS     5
+#define MAXCLK    18   // (แชร์กับ TFT_CLK)
 
 // --- Relay Output ---
 #define RELAY_PIN 15
@@ -89,7 +89,6 @@ void setup() {
   Serial.println("Type 'ON' or 'OFF' to control the relay.");
 
   // --- 5.4 (ตัวอย่าง) MAX31855 เริ่มใช้งาน (คอมเมนต์ไว้หากยังไม่ได้ต่อจริง) ---
-  /*
   delay(500);
   Serial.print("Initializing sensor...");
   if (!thermocouple.begin()) {
@@ -97,7 +96,7 @@ void setup() {
     while (1) delay(10);
   }
   Serial.println("DONE.");
-  */
+  
 
   // --- 5.5 ตั้งค่า TFT ---
   tft.begin();
