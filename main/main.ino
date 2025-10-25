@@ -24,7 +24,7 @@
 
 #define ENCODER_A 36
 #define ENCODER_B 39
-#define ENCODER_SW 34
+#define ENCODER_SW 34 // NOTE: This pin requires an EXTERNAL 10k pull-up resistor to 3.3V
 
 #define TFT_DC    27
 #define TFT_CS    26
@@ -37,17 +37,16 @@
 #define IR2_ADDR 0x11
 
 // --- SSR Output (Burst-Fire) ---
-// [REFACTOR] Using pin 25. GPIO2 is unreliable (strapping pin, LED).
-#define SSR_PIN         25      // ขาที่สั่ง SSR
+#define SSR_PIN         25      // Using pin 25.
 #define TPO_TICK_US     1000    // 1 ms tick
-#define WINDOW_MS_INIT  1000    // เริ่มต้นหน้าต่าง 1000 ms
+#define WINDOW_MS_INIT  1000    // 1000 ms window
 
 // ========== [3) Objects] ==========
 Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
 Adafruit_ILI9341  tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
-Ticker tpo_ticker; // [NEW] Ticker object for the ISR
+Ticker tpo_ticker; // Ticker object for the ISR
 
 // ========== [4) Runtime / Display Vars] ==========
 long lastEncoderValue = 0;
@@ -65,9 +64,9 @@ float go_to     = NAN;
 bool  has_go_to = false;
 
 const int   ENCODER_COUNTS_PER_STEP = 4;
-const float STEP_SIZE               = 0.5f;
+const float STEP_SIZE               = 5.0f; // Set to 5.0 per user request
 
-float Kp = 1.0f, Ki = 0.0f, Kd = 0.0f;
+float Kp = 2.0f, Ki = 0.05f, Kd = 0.0f;
 float pid_integral = 0.0f;
 float pid_prev_err = 0.0f;
 
@@ -78,15 +77,12 @@ float last_pwm_percent     = 0.0f;
 uint16_t COLOR_ORANGE = 0;
 
 // ========== [5) TPO via Hardware Timer] ==========
-// [REMOVED] hw_timer_t* tpo_timer = nullptr; (Ticker handles this)
 portMUX_TYPE tpoMux   = portMUX_INITIALIZER_UNLOCKED;
 
-// ค่าที่ ISR ใช้ (ต้อง volatile)
 volatile uint32_t tpo_window_period_ticks = WINDOW_MS_INIT; 
 volatile uint32_t tpo_on_ticks            = 0;              
 volatile uint32_t tpo_tick_counter        = 0;              
 
-// เปลี่ยนเปอร์เซ็นต์กำลัง -> อัปเดตตัวแปรที่ ISR ใช้
 void tpo_set_percent(float percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
@@ -98,7 +94,6 @@ void tpo_set_percent(float percent) {
   portEXIT_CRITICAL(&tpoMux);
 }
 
-// เปลี่ยนขนาดหน้าต่าง (ms)
 void tpo_set_window_ms(uint32_t window_ms) {
   if (window_ms < 100)  window_ms = 100;  
   if (window_ms > 5000) window_ms = 5000; 
@@ -110,12 +105,10 @@ void tpo_set_window_ms(uint32_t window_ms) {
   portEXIT_CRITICAL(&tpoMux);
 }
 
-// [ISR - CRITICAL FIX] Added locks
 void IRAM_ATTR tpo_isr() {
   uint32_t pos;
   uint32_t onTicks;
 
-  // --- Start Critical Section ---
   portENTER_CRITICAL_ISR(&tpoMux);
   pos = tpo_tick_counter;
   onTicks = tpo_on_ticks;
@@ -125,7 +118,6 @@ void IRAM_ATTR tpo_isr() {
     tpo_tick_counter = 0; // Wrap around
   }
   portEXIT_CRITICAL_ISR(&tpoMux);
-  // --- End Critical Section ---
 
   bool on = (pos < onTicks);
   digitalWrite(SSR_PIN, on ? HIGH : LOW);
@@ -139,6 +131,7 @@ void heater_read();
 void read_mlx_sensors();
 void read_hardware_encoder();
 void check_encoder_switch();
+void printForSerialPlotter(); // Added for plotter function
 
 // ========== [7) Setup] ==========
 void setup() {
@@ -151,7 +144,9 @@ void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
 
-  pinMode(ENCODER_SW, INPUT_PULLUP);
+  // [FIX] Pin 34 is input-only and has NO internal pull-up.
+  // This requires an EXTERNAL 10k pull-up resistor to 3.3V.
+  pinMode(ENCODER_SW, INPUT); 
 
   // PCNT (encoder)
   pcnt_config_t pcnt_config = {};
@@ -171,10 +166,19 @@ void setup() {
   pcnt_counter_resume(PCNT_UNIT_0);
 
   Wire.begin();
-  if (!mlx1.begin(IR1_ADDR, &Wire)) { Serial.println("Error connecting to MLX #1 (Addr 0x10)"); while (1) {} }
-  if (!mlx2.begin(IR2_ADDR, &Wire)) { Serial.println("Error connecting to MLX #2 (Addr 0x11)"); while (1) {} }
-
-  if (!thermocouple.begin()) { Serial.println("MAX31855 init ERROR"); while (1) {} }
+  // [FIX] Re-enabled sensor initialization
+  if (!mlx1.begin(IR1_ADDR, &Wire)) { 
+// Serial.println("Error connecting to MLX #1 (Addr 0x10)"); 
+  while (1) {} 
+  }
+  if (!mlx2.begin(IR2_ADDR, &Wire)) { 
+// Serial.println("Error connecting to MLX #2 (Addr 0x11)"); 
+  while (1) {} 
+  }
+  if (!thermocouple.begin()) { 
+// Serial.println("MAX31855 init ERROR"); 
+  while (1) {} 
+  }
 
   tft.begin();
   tft.setRotation(0);
@@ -186,12 +190,11 @@ void setup() {
   tpo_set_window_ms(WINDOW_MS_INIT);
   tpo_set_percent(0.0f);
 
-  // [NEW] Start the 1ms ISR using Ticker
+  // Start the 1ms ISR using Ticker
   tpo_ticker.attach_ms(1, tpo_isr);
 
-  // [REMOVED] All manual timer setup lines (timerBegin, timerAttach, etc.)
-
-  Serial.println("Ready (Ticker 1ms). Use: PWM <0..100>, AUTO, PWM?, WIN=ms");
+  // [FIX] Re-enabled Serial print
+  // Serial.println("Ready (Ticker 1ms). Use: PWM <0..100>, AUTO, PWM?, WIN=ms");
 }
 
 // ========== [8) Main Loop: cooperative, no delay()] ==========
@@ -205,18 +208,6 @@ void loop() {
   static uint32_t t_sens = 0, t_disp = 0, t_ctl = 0, t_plot = 0;
   uint32_t now = millis();
 
-  // [DEBUG] You can re-add the debug print block here if you need it
-  // static uint32_t t_debug = 0;
-  // if (now - t_debug >= 1000) {
-  //   t_debug = now;
-  //   uint32_t count, on_ticks;
-  //   portENTER_CRITICAL(&tpoMux);
-  //   count = tpo_tick_counter;
-  //   on_ticks = tpo_on_ticks;
-  //   portEXIT_CRITICAL(&tpoMux);
-  //   Serial.printf("DEBUG: Tick=%u, OnTicks=%u, PWM=%.1f\n", count, on_ticks, last_pwm_percent);
-  // }
-  
   // Read sensors ~100 ms
   if (now - t_sens >= 100) {
     t_sens = now;
@@ -236,10 +227,9 @@ void loop() {
     updateDisplay();
   }
 
+  // Print data for Serial Plotter ~200 ms
   if (now - t_plot >= 200) {
     t_plot = now;
-    // Make sure you are only calling ONE of these
-    // plotSerial(); // This is the TEXT one
     printForSerialPlotter(); // This is the DATA one
   }
 }
@@ -269,16 +259,16 @@ void read_heater_input() {
 
   if (up == "AUTO") {
     pwm_override_enabled = false;
-    Serial.println("MODE=AUTO(PID)");
+    // Serial.println("MODE=AUTO(PID)"); // [FIX] Re-enabled
     return;
   }
 
   if (up == "PWM?" || up == "STATUS?" || up == "DUTY?") {
-    Serial.print("MODE: "); Serial.println(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)");
-    Serial.print("PWM%: "); Serial.println(last_pwm_percent, 2);
-    Serial.print("WINDOW_MS: ");
+    // Serial.print("MODE: "); Serial.println(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)"); // [FIX] Re-enabled
+    // Serial.print("PWM%: "); Serial.println(last_pwm_percent, 2);
+    // Serial.print("WINDOW_MS: "); // [FIX] Re-enabled
     uint32_t w; portENTER_CRITICAL(&tpoMux); w = tpo_window_period_ticks; portEXIT_CRITICAL(&tpoMux);
-    Serial.println(w);
+    // Serial.println(w); // [FIX] Re-enabled
     return;
   }
 
@@ -292,7 +282,7 @@ void read_heater_input() {
     if (w < 100)  w = 100;
     if (w > 5000) w = 5000;
     tpo_set_window_ms(w);
-    Serial.print("WINDOW_MS="); Serial.println(w);
+    // Serial.print("WINDOW_MS="); Serial.println(w); // [FIX] Re-enabled
     return;
   }
 
@@ -307,14 +297,14 @@ void read_heater_input() {
     pwm_override_enabled = true;
     pwm_override_percent = pct;
     tpo_set_percent(pct);
-    Serial.print("MODE=OVERRIDE, PWM%="); Serial.println(pct, 2);
+    // Serial.print("MODE=OVERRIDE, PWM%="); Serial.println(pct, 2); // [FIX] Re-enabled
     return;
   }
 
-  if (up == "ON")  { digitalWrite(RELAY_PIN, HIGH); Serial.println("Relay ON");  return; }
-  if (up == "OFF") { digitalWrite(RELAY_PIN, LOW);  Serial.println("Relay OFF"); return; }
+  // if (up == "ON")  { digitalWrite(RELAY_PIN, HIGH); Serial.println("Relay ON");  return; }
+  // if (up == "OFF") { digitalWrite(RELAY_PIN, LOW);  Serial.println("Relay OFF"); return; }
 
-  Serial.println("Unknown. Use: PWM <0..100>, AUTO, PWM?, WIN=<100..5000>, ON, OFF");
+  // Serial.println("Unknown. Use: PWM <0..100>, AUTO, PWM?, WIN=<100..5000>, ON, OFF"); // [FIX] Re-enabled
 }
 
 // ========== [11) Encoder] ==========
@@ -341,7 +331,7 @@ void check_encoder_switch() {
     has_go_to = true;
     pid_integral = 0.0f;
     pid_prev_err = 0.0f;
-    Serial.println("Commit go_to = setpoint");
+    // Serial.println("Commit go_to = setpoint"); // [FIX] Re-enabled
   }
   lastSwitchState = cur;
 }
@@ -352,14 +342,9 @@ void updateControl() {
     return;
   }
   if (!has_go_to) { tpo_set_percent(0); return; }
-  // if (isnan(avg_temp_display)) { tpo_set_percent(0); return; }
 
-  // float error = go_to - avg_temp_display;
-
+  // Use K-type sensor (max_temp_display) for control
   if (isnan(max_temp_display)) { tpo_set_percent(0); return; }
-
-  // [AND CHANGE THIS LINE]
-  // Calculate error using the K-type sensor
   float error = go_to - max_temp_display;
   
   const float DEADBAND = 0.1f;
@@ -474,10 +459,11 @@ void updateDisplay() {
   }
 }
 
-
+// ========== [15) Serial Plotter Data] ==========
 void printForSerialPlotter() {
   // Get the two values we want to plot
   float temp = max_temp_display;
+  float ir_temp = avg_temp_display;
   float sp = has_go_to ? go_to : NAN;
 
   // The Serial Plotter doesn't graph 'NAN'. 
@@ -492,6 +478,14 @@ void printForSerialPlotter() {
     Serial.print(0.0);
   } else {
     Serial.print(temp, 2);
+  }
+
+  Serial.print(",");
+
+  if (isnan(ir_temp)) {
+    Serial.print(0.0);
+  } else {
+    Serial.print(ir_temp, 2);
   }
   
   Serial.print(",");
