@@ -1,15 +1,18 @@
 /****************************************************
  * ESP32 + MAX31855 x2 + MLX90614 x2 + Encoder + ILI9341
  * Heater control via SSR using Time-Proportioning (Burst Fire)
- * - Uses Ticker library for stable 1ms ISR
- * - [REFACTOR] Uses an array for MAX31855 sensors
+ *
+ * [MODIFIED]:
+ * - Removed Adafruit_MAX31855 library
+ * - Integrated manual bit-bang SPI logic from max_seperate.ino
+ * to read MAX31855 sensors.
  ****************************************************/
 
 // ========== [1) Include Libraries] ==========
-#include <SPI.h>
+#include <SPI.h>       // Note: SPI.h is not strictly needed by manual code, but good to keep if other SPI devices exist.
 #include <Wire.h>
 #include <math.h>
-#include "Adafruit_MAX31855.h"
+// #include "Adafruit_MAX31855.h" // <-- REMOVED
 #include "Adafruit_MLX90614.h"
 #include "driver/pcnt.h"
 #include "Adafruit_GFX.h"
@@ -17,7 +20,6 @@
 #include <Ticker.h>
 
 // ========== [2) Pin Definitions] ==========
-// [REFACTOR] Renamed for array
 #define MAXDO     19 // MISO (Shared)
 #define MAXCLK    18 // SCK (Shared)
 #define MAXCS1    5  // CS for sensor 1
@@ -25,7 +27,7 @@
 
 #define ENCODER_A 36
 #define ENCODER_B 39
-#define ENCODER_SW 32
+#define ENCODER_SW 34
 
 #define TFT_DC    27
 #define TFT_CS    26
@@ -42,19 +44,19 @@
 #define TPO_TICK_US     1000
 #define WINDOW_MS_INIT  1000
 
-#define MAX_GUARD_US  50
+// --- MAX31855 Manual Driver Config ---
+#ifndef MAX_GUARD_US
+#define MAX_GUARD_US 50   // gap between CS changes;
+#endif
 
-// ========== [3) Objects] ==========
-// [REFACTOR] Use an array for thermocouples
-Adafruit_MAX31855 thermocouples[] = {
-  Adafruit_MAX31855(MAXCLK, MAXCS1, MAXDO),
-  Adafruit_MAX31855(MAXCLK, MAXCS2, MAXDO)
-};
-// [NEW] Helper to get the number of TCs
-const int NUM_THERMOCOUPLES = sizeof(thermocouples) / sizeof(thermocouples[0]);
+// ========== [3) Objects & Manual MAX31855 Config] ==========
 
-static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 }; // ถ้ามี >2 ตัว ให้เพิ่มพินในลิสต์นี้
-static_assert(sizeof(TC_CS_PINS)/sizeof(TC_CS_PINS[0]) == NUM_THERMOCOUPLES, "TC_CS_PINS size must match NUM_THERMOCOUPLES");
+// [REMOVED] Adafruit_MAX31855 thermocouples[] = { ... };
+
+// [ADDED] Config from max_seperate.ino
+static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 }; // Add more CS pins here if you have >2 sensors
+const int NUM_THERMOCOUPLES = sizeof(TC_CS_PINS) / sizeof(TC_CS_PINS[0]);
+// static_assert(sizeof(TC_CS_PINS)/sizeof(TC_CS_PINS[0]) == NUM_THERMOCOUPLES, "TC_CS_PINS size must match NUM_THERMOCOUPLES"); // Can't use in .ino
 
 Adafruit_ILI9341  tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
@@ -65,8 +67,10 @@ Ticker tpo_ticker;
 long lastEncoderValue = 0;
 int  lastSwitchState  = HIGH;
 
-// [REFACTOR] Use an array for TC temps
-float   tc_temp_display[NUM_THERMOCOUPLES] = { NAN, NAN }; // Index 0 is TC1, Index 1 is TC2
+// [MODIFIED] Storage for manual MAX31855 reading
+float   tc_temp_display[NUM_THERMOCOUPLES]; // thermocouple temperature (°C)
+float   cj_temp_display[NUM_THERMOCOUPLES]; // cold-junction temperature (°C)
+uint8_t tc_fault_bits[NUM_THERMOCOUPLES];   // fault summary per channel
 
 float   ir1_temp_display = NAN;
 float   ir2_temp_display = NAN;
@@ -141,13 +145,23 @@ void IRAM_ATTR tpo_isr() {
 void updateDisplay();
 void updateControl();
 void read_heater_input();
-void heater_read();
+void heater_read(); // This will be the manual version
 void read_mlx_sensors();
 void read_hardware_encoder();
 void check_encoder_switch();
 
-static inline void tc_all_cs_idle_init_once();
-static inline void tc_all_cs_idle();
+// [REMOVED] tc_all_cs_idle_init_once();
+// [REMOVED] tc_all_cs_idle();
+
+// [ADDED] Forward declarations for manual MAX31855 functions
+void max31855_init_pins();
+static inline void all_cs_idle();
+uint32_t max31855_read_raw(int csPin);
+bool max31855_decode(uint32_t raw, float* tc_c, float* tj_c, uint8_t* faults);
+bool max31855_read_celsius(int csPin, float* tc_c, float* tj_c, uint8_t* faults, uint32_t* raw_out);
+static inline int32_t sign_extend(int32_t v, uint8_t nbits);
+
+
 // ========== [7) Setup] ==========
 void setup() {
   Serial.begin(115200);
@@ -157,10 +171,12 @@ void setup() {
   digitalWrite(SSR_PIN, LOW);
   pinMode(ENCODER_SW, INPUT_PULLUP);
 
-  pinMode(MAXCS1, OUTPUT);
-  pinMode(MAXCS2, OUTPUT);
-  digitalWrite(MAXCS1, HIGH);
-  digitalWrite(MAXCS2, HIGH);
+  // [REMOVED] Manual pinMode/digitalWrite for MAXCS1/2, handled by init
+  // [REMOVED] pinMode(MAXCS1, OUTPUT);
+  // [REMOVED] pinMode(MAXCS2, OUTPUT);
+  // [REMOVED] digitalWrite(MAXCS1, HIGH);
+  // [REMOVED] digitalWrite(MAXCS2, HIGH);
+
   // PCNT (encoder)
   pcnt_config_t pcnt_config = {};
   pcnt_config.pulse_gpio_num = ENCODER_A;
@@ -182,19 +198,25 @@ void setup() {
   if (!mlx1.begin(IR1_ADDR, &Wire)) { Serial.println("Error connecting to MLX #1 (Addr 0x10)"); while (1) {} }
   if (!mlx2.begin(IR2_ADDR, &Wire)) { Serial.println("Error connecting to MLX #2 (Addr 0x11)"); while (1) {} }
 
-  // [REFACTOR] Initialize all thermocouples in a loop
+  // [REMOVED] Adafruit library init loop
+  // [REMOVED] for (int i = 0; i < NUM_THERMOCOUPLES; i++) { ... }
+
+  // [ADDED] Initialize manual MAX31855 driver
+  max31855_init_pins();
+  Serial.println("Using manual MAX31855 driver.");
+
+  // [ADDED] Initialize temp arrays
   for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
-    if (!thermocouples[i].begin()) {
-      Serial.printf("MAX31855 #%d init ERROR\n", i + 1);
-      while (1) {}
-    }
+    tc_temp_display[i] = NAN;
+    cj_temp_display[i] = NAN;
+    tc_fault_bits[i] = 0;
   }
 
   tft.begin();
   tft.setRotation(0);
   tft.fillScreen(ILI9341_BLACK);
   COLOR_ORANGE = tft.color565(255, 165, 0);
-  updateDisplay();
+  updateDisplay(); // Draw initial labels
 
   // TPO setup
   tpo_set_window_ms(WINDOW_MS_INIT);
@@ -216,7 +238,7 @@ void loop() {
   // Read sensors ~100 ms
   if (now - t_sens >= 100) {
     t_sens = now;
-    heater_read();
+    heater_read(); // Now calls the manual version
     read_mlx_sensors();
   }
 
@@ -239,34 +261,37 @@ void loop() {
 }
 
 // ========== [9) Sensor Reading] ==========
+
+// [REPLACED] Replaced with manual logic from max_seperate.ino
 void heater_read() {
-  tc_all_cs_idle_init_once();
-
   for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
-    // ปล่อยทุก CS ขึ้นสูงค้างสักแป๊บให้เฟรมก่อนหน้าจบสนิท
-    tc_all_cs_idle();
-    delayMicroseconds(MAX_GUARD_US);
+    float tc, tj;
+    uint8_t fb;
+    uint32_t raw; // For debug
 
-    // อ่านทีละตัว พร้อมกัน ISR ไม่ให้มารบกวน timing ของ SCK/CS
-    float t = NAN;
-    for (int attempt = 0; attempt < 3; ++attempt) {   // เผื่อเฟรมพลาด ลองซ้ำเล็กน้อย
-      noInterrupts();
-      t = thermocouples[i].readCelsius();            // ไลบรารีจะกด/ปล่อย CS ของตัวที่ i ให้เอง
-      interrupts();
-
-      if (!isnan(t)) break;
-      delayMicroseconds(MAX_GUARD_US);
-      tc_all_cs_idle();                               // ย้ำ idle ก่อนลองใหม่
-      delayMicroseconds(MAX_GUARD_US);
+    // Retry a couple times (max31855_read_celsius also has internal retries for 0x0/0xFF)
+    bool ok = false;
+    for (int attempt = 0; attempt < 2 && !ok; ++attempt) {
+      ok = max31855_read_celsius(TC_CS_PINS[i], &tc, &tj, &fb, &raw);
+      if (!ok) delayMicroseconds(MAX_GUARD_US);
     }
 
-    tc_temp_display[i] = t;
+    if(ok) {
+        tc_temp_display[i] = tc;
+        cj_temp_display[i] = tj;
+    } else {
+        tc_temp_display[i] = NAN; // Store NAN on persistent fault
+        cj_temp_display[i] = NAN;
+    }
+    tc_fault_bits[i] = fb;
 
-    // เว้นช่องไฟก่อนจะไปตัวถัดไป
-    tc_all_cs_idle();
-    delayMicroseconds(MAX_GUARD_US);
+    // Debug print from max_seperate.ino is removed to avoid spamming the plotter.
+    // You can re-enable it if needed:
+    // Serial.printf("TC[%d] RAW=0x%08lX  T=%.2f°C  CJ=%.2f°C  Fault=0x%02X%s\n",
+    //               i, raw, tc, tj, fb, ok ? "" : " (FAULT)");
   }
 }
+
 
 void read_mlx_sensors() {
   float t1 = mlx1.readObjectTempC();
@@ -465,15 +490,32 @@ void updateDisplay() {
     else           printTxt(yLine[3], "---");
   }
 
-  // [REFACTOR] Update display using the temperature array
+  // [REFACTOR] Update display using the temperature array (This code requires no changes)
+  // [MODIFIED] Do not show "ERR". Keep displaying the last known good value if current read is NAN.
   if (tc_temp_display[0] != prev_tc1) {
-    prev_tc1 = tc_temp_display[0];
-    if(isnan(prev_tc1)) printTxt(yLine[4], "ERR"); else printVal(yLine[4], prev_tc1);
+    if (!isnan(tc_temp_display[0])) { // Only update if the new value is NOT NAN
+        prev_tc1 = tc_temp_display[0];
+        printVal(yLine[4], prev_tc1);
+    } else {
+        // New value is NAN, do nothing.
+        // This will keep the display showing the old 'prev_tc1' value.
+        // If it's NAN from the start, we can show "---".
+        if (isnan(prev_tc1)) { // Only true on the very first run
+            printTxt(yLine[4], "---");
+        }
+    }
   }
 
   if (tc_temp_display[1] != prev_tc2) {
-    prev_tc2 = tc_temp_display[1];
-    if(isnan(prev_tc2)) printTxt(yLine[5], "ERR"); else printVal(yLine[5], prev_tc2);
+    if (!isnan(tc_temp_display[1])) { // Only update if the new value is NOT NAN
+        prev_tc2 = tc_temp_display[1];
+        printVal(yLine[5], prev_tc2);
+    } else {
+        // New value is NAN, do nothing.
+        if (isnan(prev_tc2)) { // Only true on the very first run
+            printTxt(yLine[5], "---");
+        }
+    }
   }
 
   if (ir1_temp_display != prev_ir1) {
@@ -488,7 +530,7 @@ void updateDisplay() {
 }
 
 void printForSerialPlotter() {
-  // [REFACTOR] Get values from the temperature array
+  // [REFACTOR] Get values from the temperature array (This code requires no changes)
   float temp1 = tc_temp_display[0];
   float temp2 = tc_temp_display[1];
   float sp = has_go_to ? go_to : NAN;
@@ -510,19 +552,111 @@ void printForSerialPlotter() {
   Serial.println(sp, 2);
 }
 
-static inline void tc_all_cs_idle_init_once() {
-  static bool inited = false;
-  if (!inited) {
-    for (int k = 0; k < NUM_THERMOCOUPLES; ++k) {
-      pinMode(TC_CS_PINS[k], OUTPUT);
-      digitalWrite(TC_CS_PINS[k], HIGH); // idle = ไม่เลือกชิป
-    }
-    inited = true;
+
+// ========== [14) Manual MAX31855 Driver Functions] ==========
+// All functions below are copied from max_seperate.ino
+
+// Helper to sign-extend a value
+static inline int32_t sign_extend(int32_t v, uint8_t nbits) {
+  int32_t shift = 32 - nbits;
+  return (v << shift) >> shift;
+}
+
+// Initialize all MAX31855-related pins
+void max31855_init_pins() {
+  pinMode(MAXCLK, OUTPUT);
+  pinMode(MAXDO, INPUT_PULLUP);
+  digitalWrite(MAXCLK, LOW);          // CPOL=0 idle LOW
+
+  for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
+    pinMode(TC_CS_PINS[i], OUTPUT);
+    digitalWrite(TC_CS_PINS[i], HIGH); // idle = not selected
   }
 }
 
-static inline void tc_all_cs_idle() {
-  for (int k = 0; k < NUM_THERMOCOUPLES; ++k) {
-    digitalWrite(TC_CS_PINS[k], HIGH);
-  }
+// Set all CS pins to idle (HIGH)
+static inline void all_cs_idle() {
+  for (int i = 0; i < NUM_THERMOCOUPLES; ++i) digitalWrite(TC_CS_PINS[i], HIGH);
 }
+
+// Shift out 32-bit frame from MAX31855 (MSB first), sample on SCK rising edge
+uint32_t max31855_read_raw(int csPin) {
+  uint32_t v = 0;
+
+  all_cs_idle();
+  delayMicroseconds(MAX_GUARD_US);
+
+  noInterrupts();
+  digitalWrite(csPin, LOW);
+  delayMicroseconds(2);               // tCSS: allow CS to settle before clocking
+
+  for (int i = 31; i >= 0; --i) {
+    // Rising edge: sample DO
+    digitalWrite(MAXCLK, HIGH);
+    delayMicroseconds(2);
+    int bit = digitalRead(MAXDO);
+    v |= (uint32_t(bit) << i);
+
+    // Falling edge: device shifts next bit
+    digitalWrite(MAXCLK, LOW);
+    delayMicroseconds(2);
+  }
+
+  digitalWrite(csPin, HIGH);
+  interrupts();
+
+  delayMicroseconds(MAX_GUARD_US);
+  return v;
+}
+
+/*
+  Decode RAW:
+   - [31:18] 14-bit signed thermocouple temp, 0.25°C/LSB
+   - [16]    fault flag (1 = fault)
+   - [15:4]  12-bit signed cold-junction temp, 0.0625°C/LSB
+   - [2] SCV, [1] SCG, [0] OC
+  Returns true if no global fault flag, but still fills outputs for diagnostics.
+*/
+bool max31855_decode(uint32_t raw, float* tc_c, float* tj_c, uint8_t* faults) {
+  bool fault = (raw & (1UL << 16));
+
+  int32_t tc14 = (raw >> 18) & 0x3FFF;   // 14-bit
+  tc14 = sign_extend(tc14, 14);
+  float tc = (float)tc14 * 0.25f;
+
+  int32_t tj12 = (raw >> 4) & 0x0FFF;    // 12-bit
+  tj12 = sign_extend(tj12, 12);
+  float tj = (float)tj12 * 0.0625f;
+
+  uint8_t fbits = (uint8_t)(raw & 0x07);
+  if (fault) fbits |= 0x80; // mark global fault in bit7
+
+  if (tc_c) *tc_c = tc;
+  if (tj_c) *tj_c = tj;
+  if (faults) *faults = fbits;
+
+  return !fault;
+}
+
+// Read one channel by CS pin, with retries for bad frames
+bool max31855_read_celsius(int csPin, float* tc_c, float* tj_c, uint8_t* faults, uint32_t* raw_out) {
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    uint32_t raw = max31855_read_raw(csPin);
+    if (raw_out) *raw_out = raw;
+
+    // Filter bad frames (all 0s or all 1s usually indicates MISO floating)
+    if (raw == 0x00000000UL || raw == 0xFFFFFFFFUL) {
+      delayMicroseconds(MAX_GUARD_US);
+      continue;  // Try again
+    }
+
+    return max31855_decode(raw, tc_c, tj_c, faults);
+  }
+  
+  // If all 3 attempts failed
+  if (tc_c) *tc_c = NAN;
+  if (tj_c) *tj_c = NAN;
+  if (faults) *faults = 0xFF; // All fault bits
+  return false;
+}
+
