@@ -1,7 +1,8 @@
 /****************************************************
- * ESP32 + MAX31855 + MLX90614 x2 + Encoder + ILI9341
+ * ESP32 + MAX31855 x2 + MLX90614 x2 + Encoder + ILI9341
  * Heater control via SSR using Time-Proportioning (Burst Fire)
  * - Uses Ticker library for stable 1ms ISR
+ * - [REFACTOR] Uses an array for MAX31855 sensors
  ****************************************************/
 
 // ========== [1) Include Libraries] ==========
@@ -13,18 +14,18 @@
 #include "driver/pcnt.h"
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9341.h"
-#include <Ticker.h> // [NEW] Include Ticker library
+#include <Ticker.h>
 
 // ========== [2) Pin Definitions] ==========
-#define MAXDO     19
-#define MAXCS     5
-#define MAXCLK    18
-
-#define RELAY_PIN 15 // Secondary relay, manually controlled
+// [REFACTOR] Renamed for array
+#define MAXDO     19 // MISO (Shared)
+#define MAXCLK    18 // SCK (Shared)
+#define MAXCS1    5  // CS for sensor 1
+#define MAXCS2    33 // CS for sensor 2
 
 #define ENCODER_A 36
 #define ENCODER_B 39
-#define ENCODER_SW 34
+#define ENCODER_SW 32
 
 #define TFT_DC    27
 #define TFT_CS    26
@@ -37,23 +38,36 @@
 #define IR2_ADDR 0x11
 
 // --- SSR Output (Burst-Fire) ---
-// [REFACTOR] Using pin 25. GPIO2 is unreliable (strapping pin, LED).
-#define SSR_PIN         25      // ขาที่สั่ง SSR
-#define TPO_TICK_US     1000    // 1 ms tick
-#define WINDOW_MS_INIT  1000    // เริ่มต้นหน้าต่าง 1000 ms
+#define SSR_PIN         25
+#define TPO_TICK_US     1000
+#define WINDOW_MS_INIT  1000
+
+#define MAX_GUARD_US  50
 
 // ========== [3) Objects] ==========
-Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
+// [REFACTOR] Use an array for thermocouples
+Adafruit_MAX31855 thermocouples[] = {
+  Adafruit_MAX31855(MAXCLK, MAXCS1, MAXDO),
+  Adafruit_MAX31855(MAXCLK, MAXCS2, MAXDO)
+};
+// [NEW] Helper to get the number of TCs
+const int NUM_THERMOCOUPLES = sizeof(thermocouples) / sizeof(thermocouples[0]);
+
+static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 }; // ถ้ามี >2 ตัว ให้เพิ่มพินในลิสต์นี้
+static_assert(sizeof(TC_CS_PINS)/sizeof(TC_CS_PINS[0]) == NUM_THERMOCOUPLES, "TC_CS_PINS size must match NUM_THERMOCOUPLES");
+
 Adafruit_ILI9341  tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
-Ticker tpo_ticker; // [NEW] Ticker object for the ISR
+Ticker tpo_ticker;
 
 // ========== [4) Runtime / Display Vars] ==========
 long lastEncoderValue = 0;
 int  lastSwitchState  = HIGH;
 
-float   max_temp_display = NAN;
+// [REFACTOR] Use an array for TC temps
+float   tc_temp_display[NUM_THERMOCOUPLES] = { NAN, NAN }; // Index 0 is TC1, Index 1 is TC2
+
 float   ir1_temp_display = NAN;
 float   ir2_temp_display = NAN;
 float   avg_temp_display = NAN;
@@ -71,38 +85,34 @@ float Kp = 1.0f, Ki = 0.0f, Kd = 0.0f;
 float pid_integral = 0.0f;
 float pid_prev_err = 0.0f;
 
-bool  pwm_override_enabled = false; 
-float pwm_override_percent = 0.0f;  
-float last_pwm_percent     = 0.0f;  
+bool  pwm_override_enabled = false;
+float pwm_override_percent = 0.0f;
+float last_pwm_percent     = 0.0f;
 
 uint16_t COLOR_ORANGE = 0;
 
 // ========== [5) TPO via Hardware Timer] ==========
-// [REMOVED] hw_timer_t* tpo_timer = nullptr; (Ticker handles this)
-portMUX_TYPE tpoMux   = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
 
-// ค่าที่ ISR ใช้ (ต้อง volatile)
-volatile uint32_t tpo_window_period_ticks = WINDOW_MS_INIT; 
-volatile uint32_t tpo_on_ticks            = 0;              
-volatile uint32_t tpo_tick_counter        = 0;              
+volatile uint32_t tpo_window_period_ticks = WINDOW_MS_INIT;
+volatile uint32_t tpo_on_ticks            = 0;
+volatile uint32_t tpo_tick_counter        = 0;
 
-// เปลี่ยนเปอร์เซ็นต์กำลัง -> อัปเดตตัวแปรที่ ISR ใช้
 void tpo_set_percent(float percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
   last_pwm_percent = percent;
   uint32_t onTicks = (uint32_t)((percent / 100.0f) * (float)tpo_window_period_ticks + 0.5f);
-  
+
   portENTER_CRITICAL(&tpoMux);
   tpo_on_ticks = onTicks;
   portEXIT_CRITICAL(&tpoMux);
 }
 
-// เปลี่ยนขนาดหน้าต่าง (ms)
 void tpo_set_window_ms(uint32_t window_ms) {
-  if (window_ms < 100)  window_ms = 100;  
-  if (window_ms > 5000) window_ms = 5000; 
-  
+  if (window_ms < 100)  window_ms = 100;
+  if (window_ms > 5000) window_ms = 5000;
+
   portENTER_CRITICAL(&tpoMux);
   tpo_window_period_ticks = window_ms;
   if (tpo_tick_counter >= tpo_window_period_ticks) tpo_tick_counter = 0;
@@ -110,22 +120,18 @@ void tpo_set_window_ms(uint32_t window_ms) {
   portEXIT_CRITICAL(&tpoMux);
 }
 
-// [ISR - CRITICAL FIX] Added locks
 void IRAM_ATTR tpo_isr() {
   uint32_t pos;
   uint32_t onTicks;
 
-  // --- Start Critical Section ---
   portENTER_CRITICAL_ISR(&tpoMux);
   pos = tpo_tick_counter;
   onTicks = tpo_on_ticks;
-  
-  tpo_tick_counter++; 
+  tpo_tick_counter++;
   if (tpo_tick_counter >= tpo_window_period_ticks) {
-    tpo_tick_counter = 0; // Wrap around
+    tpo_tick_counter = 0;
   }
   portEXIT_CRITICAL_ISR(&tpoMux);
-  // --- End Critical Section ---
 
   bool on = (pos < onTicks);
   digitalWrite(SSR_PIN, on ? HIGH : LOW);
@@ -140,6 +146,8 @@ void read_mlx_sensors();
 void read_hardware_encoder();
 void check_encoder_switch();
 
+static inline void tc_all_cs_idle_init_once();
+static inline void tc_all_cs_idle();
 // ========== [7) Setup] ==========
 void setup() {
   Serial.begin(115200);
@@ -147,12 +155,12 @@ void setup() {
 
   pinMode(SSR_PIN, OUTPUT);
   digitalWrite(SSR_PIN, LOW);
-  
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
-
   pinMode(ENCODER_SW, INPUT_PULLUP);
 
+  pinMode(MAXCS1, OUTPUT);
+  pinMode(MAXCS2, OUTPUT);
+  digitalWrite(MAXCS1, HIGH);
+  digitalWrite(MAXCS2, HIGH);
   // PCNT (encoder)
   pcnt_config_t pcnt_config = {};
   pcnt_config.pulse_gpio_num = ENCODER_A;
@@ -174,7 +182,13 @@ void setup() {
   if (!mlx1.begin(IR1_ADDR, &Wire)) { Serial.println("Error connecting to MLX #1 (Addr 0x10)"); while (1) {} }
   if (!mlx2.begin(IR2_ADDR, &Wire)) { Serial.println("Error connecting to MLX #2 (Addr 0x11)"); while (1) {} }
 
-  if (!thermocouple.begin()) { Serial.println("MAX31855 init ERROR"); while (1) {} }
+  // [REFACTOR] Initialize all thermocouples in a loop
+  for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
+    if (!thermocouples[i].begin()) {
+      Serial.printf("MAX31855 #%d init ERROR\n", i + 1);
+      while (1) {}
+    }
+  }
 
   tft.begin();
   tft.setRotation(0);
@@ -185,38 +199,20 @@ void setup() {
   // TPO setup
   tpo_set_window_ms(WINDOW_MS_INIT);
   tpo_set_percent(0.0f);
-
-  // [NEW] Start the 1ms ISR using Ticker
   tpo_ticker.attach_ms(1, tpo_isr);
-
-  // [REMOVED] All manual timer setup lines (timerBegin, timerAttach, etc.)
 
   Serial.println("Ready (Ticker 1ms). Use: PWM <0..100>, AUTO, PWM?, WIN=ms");
 }
 
 // ========== [8) Main Loop: cooperative, no delay()] ==========
 void loop() {
-  // non-blocking jobs
   read_heater_input();
   read_hardware_encoder();
   check_encoder_switch();
 
-  // periodic jobs via millis()
   static uint32_t t_sens = 0, t_disp = 0, t_ctl = 0, t_plot = 0;
   uint32_t now = millis();
 
-  // [DEBUG] You can re-add the debug print block here if you need it
-  // static uint32_t t_debug = 0;
-  // if (now - t_debug >= 1000) {
-  //   t_debug = now;
-  //   uint32_t count, on_ticks;
-  //   portENTER_CRITICAL(&tpoMux);
-  //   count = tpo_tick_counter;
-  //   on_ticks = tpo_on_ticks;
-  //   portEXIT_CRITICAL(&tpoMux);
-  //   Serial.printf("DEBUG: Tick=%u, OnTicks=%u, PWM=%.1f\n", count, on_ticks, last_pwm_percent);
-  // }
-  
   // Read sensors ~100 ms
   if (now - t_sens >= 100) {
     t_sens = now;
@@ -227,7 +223,7 @@ void loop() {
   // Update control ~50 ms
   if (now - t_ctl >= 50) {
     t_ctl = now;
-    updateControl();   
+    updateControl();
   }
 
   // Update display ~50 ms
@@ -238,16 +234,38 @@ void loop() {
 
   if (now - t_plot >= 200) {
     t_plot = now;
-    // Make sure you are only calling ONE of these
-    // plotSerial(); // This is the TEXT one
-    printForSerialPlotter(); // This is the DATA one
+    printForSerialPlotter();
   }
 }
 
 // ========== [9) Sensor Reading] ==========
 void heater_read() {
-  double c = thermocouple.readCelsius();
-  max_temp_display = c;
+  tc_all_cs_idle_init_once();
+
+  for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
+    // ปล่อยทุก CS ขึ้นสูงค้างสักแป๊บให้เฟรมก่อนหน้าจบสนิท
+    tc_all_cs_idle();
+    delayMicroseconds(MAX_GUARD_US);
+
+    // อ่านทีละตัว พร้อมกัน ISR ไม่ให้มารบกวน timing ของ SCK/CS
+    float t = NAN;
+    for (int attempt = 0; attempt < 3; ++attempt) {   // เผื่อเฟรมพลาด ลองซ้ำเล็กน้อย
+      noInterrupts();
+      t = thermocouples[i].readCelsius();            // ไลบรารีจะกด/ปล่อย CS ของตัวที่ i ให้เอง
+      interrupts();
+
+      if (!isnan(t)) break;
+      delayMicroseconds(MAX_GUARD_US);
+      tc_all_cs_idle();                               // ย้ำ idle ก่อนลองใหม่
+      delayMicroseconds(MAX_GUARD_US);
+    }
+
+    tc_temp_display[i] = t;
+
+    // เว้นช่องไฟก่อนจะไปตัวถัดไป
+    tc_all_cs_idle();
+    delayMicroseconds(MAX_GUARD_US);
+  }
 }
 
 void read_mlx_sensors() {
@@ -256,10 +274,10 @@ void read_mlx_sensors() {
   ir1_temp_display = t1;
   ir2_temp_display = t2;
   if (!isnan(t1) && !isnan(t2)) avg_temp_display = (t1 + t2) / 2.0f;
-  else                          avg_temp_display = NAN;
+  else                        avg_temp_display = NAN;
 }
 
-// ========== [10) Serial Commands: override/auto/status/window/relay] ==========
+// ========== [10) Serial Commands: override/auto/status/window] ==========
 void read_heater_input() {
   if (Serial.available() <= 0) return;
 
@@ -282,7 +300,6 @@ void read_heater_input() {
     return;
   }
 
-  // WIN=ms 
   if (up.startsWith("WIN")) {
     String val = cmd;
     val.replace("WIN", ""); val.replace("win", "");
@@ -296,7 +313,6 @@ void read_heater_input() {
     return;
   }
 
-  // PWM 35
   if (up.startsWith("PWM")) {
     String val = cmd;
     val.replace("PWM", ""); val.replace("pwm", "");
@@ -311,10 +327,7 @@ void read_heater_input() {
     return;
   }
 
-  if (up == "ON")  { digitalWrite(RELAY_PIN, HIGH); Serial.println("Relay ON");  return; }
-  if (up == "OFF") { digitalWrite(RELAY_PIN, LOW);  Serial.println("Relay OFF"); return; }
-
-  Serial.println("Unknown. Use: PWM <0..100>, AUTO, PWM?, WIN=<100..5000>, ON, OFF");
+  Serial.println("Unknown. Use: PWM <0..100>, AUTO, PWM?, WIN=<100..5000>");
 }
 
 // ========== [11) Encoder] ==========
@@ -352,16 +365,13 @@ void updateControl() {
     return;
   }
   if (!has_go_to) { tpo_set_percent(0); return; }
-  // if (isnan(avg_temp_display)) { tpo_set_percent(0); return; }
 
-  // float error = go_to - avg_temp_display;
+  // [REFACTOR] Use TC #1 (index 0) as the control sensor
+  if (isnan(tc_temp_display[0])) { tpo_set_percent(0); return; }
 
-  if (isnan(max_temp_display)) { tpo_set_percent(0); return; }
+  // Calculate error using the first K-type sensor
+  float error = go_to - tc_temp_display[0];
 
-  // [AND CHANGE THIS LINE]
-  // Calculate error using the K-type sensor
-  float error = go_to - max_temp_display;
-  
   const float DEADBAND = 0.1f;
   if (fabsf(error) < DEADBAND) error = 0.0f;
 
@@ -380,7 +390,7 @@ void updateControl() {
   float u = (Kp * error) + (Ki * pid_integral) + (Kd * derivative);
   if (u < 0.0f) u = 0.0f;
 
-  const float U_SCALE = 100.0f; 
+  const float U_SCALE = 100.0f;
   float percent = u * (100.0f / U_SCALE);
   if (percent > 100.0f) percent = 100.0f;
 
@@ -391,8 +401,9 @@ void updateControl() {
 void updateDisplay() {
   static bool ui_inited = false;
   static int yLine[8], xPos;
-  static float   prev_sp = NAN, prev_go = NAN, prev_max = NAN, prev_ir1 = NAN, prev_ir2 = NAN;
-  static int16_t prev_count = INT16_MIN;
+
+  // Renamed prev_tc1/2 for clarity, matches the array access
+  static float   prev_sp = NAN, prev_go = NAN, prev_tc1 = NAN, prev_tc2 = NAN, prev_ir1 = NAN, prev_ir2 = NAN;
   static int     prev_mode  = -1;
   static int     prev_pwm   = -1;
 
@@ -410,14 +421,15 @@ void updateDisplay() {
     for (int i=0;i<8;i++) yLine[i] = yStart + i * (CHAR_H + GAP);
     ui_inited = true;
 
+    // Using the re-ordered layout from previous request
     tft.setCursor(xPos, yLine[0]); tft.print("MODE: ");
     tft.setCursor(xPos, yLine[1]); tft.print("PWM%: ");
     tft.setCursor(xPos, yLine[2]); tft.print("SP: ");
     tft.setCursor(xPos, yLine[3]); tft.print("go_to: ");
-    tft.setCursor(xPos, yLine[4]); tft.print("MAX: ");
-    tft.setCursor(xPos, yLine[5]); tft.print("IR1: ");
-    tft.setCursor(xPos, yLine[6]); tft.print("IR2: ");
-    tft.setCursor(xPos, yLine[7]); tft.print("ENC: ");
+    tft.setCursor(xPos, yLine[4]); tft.print("TC1: ");
+    tft.setCursor(xPos, yLine[5]); tft.print("TC2: ");
+    tft.setCursor(xPos, yLine[6]); tft.print("IR1: ");
+    tft.setCursor(xPos, yLine[7]); tft.print("IR2: ");
   }
 
   int xVal = xPos + 90;
@@ -447,53 +459,70 @@ void updateDisplay() {
   if (setpoint != prev_sp) { prev_sp = setpoint; printVal(yLine[2], prev_sp); }
 
   float go_disp = has_go_to ? go_to : NAN;
-  if (go_disp != prev_go) { // Note: NAN != NAN is true
+  if (go_disp != prev_go) {
     prev_go = go_disp;
     if (has_go_to) printVal(yLine[3], prev_go);
     else           printTxt(yLine[3], "---");
   }
 
-  if (max_temp_display != prev_max) { 
-    prev_max = max_temp_display; 
-    if(isnan(prev_max)) printTxt(yLine[4], "ERR"); else printVal(yLine[4], prev_max); 
-  }
-  if (ir1_temp_display != prev_ir1) { 
-    prev_ir1 = ir1_temp_display; 
-    if(isnan(prev_ir1)) printTxt(yLine[5], "ERR"); else printVal(yLine[5], prev_ir1);
-  }
-  if (ir2_temp_display != prev_ir2) { 
-    prev_ir2 = ir2_temp_display; 
-    if(isnan(prev_ir2)) printTxt(yLine[6], "ERR"); else printVal(yLine[6], prev_ir2); 
+  // [REFACTOR] Update display using the temperature array
+  if (tc_temp_display[0] != prev_tc1) {
+    prev_tc1 = tc_temp_display[0];
+    if(isnan(prev_tc1)) printTxt(yLine[4], "ERR"); else printVal(yLine[4], prev_tc1);
   }
 
-  if (encoder_count_display != prev_count) {
-    prev_count = encoder_count_display;
-    tft.fillRect(xVal, yLine[7], VAL_W, VAL_H, ILI9341_BLACK);
-    tft.setCursor(xVal, yLine[7]);
-    char buf[20]; snprintf(buf, sizeof(buf), "%-7d", prev_count); tft.print(buf);
+  if (tc_temp_display[1] != prev_tc2) {
+    prev_tc2 = tc_temp_display[1];
+    if(isnan(prev_tc2)) printTxt(yLine[5], "ERR"); else printVal(yLine[5], prev_tc2);
+  }
+
+  if (ir1_temp_display != prev_ir1) {
+    prev_ir1 = ir1_temp_display;
+    if(isnan(prev_ir1)) printTxt(yLine[6], "ERR"); else printVal(yLine[6], prev_ir1);
+  }
+
+  if (ir2_temp_display != prev_ir2) {
+    prev_ir2 = ir2_temp_display;
+    if(isnan(prev_ir2)) printTxt(yLine[7], "ERR"); else printVal(yLine[7], prev_ir2);
   }
 }
 
-
 void printForSerialPlotter() {
-  // Get the two values we want to plot
-  float temp = max_temp_display;
+  // [REFACTOR] Get values from the temperature array
+  float temp1 = tc_temp_display[0];
+  float temp2 = tc_temp_display[1];
   float sp = has_go_to ? go_to : NAN;
 
-  // The Serial Plotter doesn't graph 'NAN'. 
-  // We'll send the current setpoint value if 'go_to' isn't set yet.
   if (isnan(sp)) {
-    sp = setpoint; 
+    sp = setpoint;
   }
-  
-  // Print "Temp,Setpoint"
-  // If the temp is NAN, print 0 so the graph doesn't stop
-  if (isnan(temp)) {
-    Serial.print(0.0);
-  } else {
-    Serial.print(temp, 2);
-  }
-  
+
+  // Print "Temp1,Temp2,Setpoint"
+  if (isnan(temp1)) Serial.print(0.0);
+  else              Serial.print(temp1, 2);
+
+  Serial.print(",");
+
+  if (isnan(temp2)) Serial.print(0.0);
+  else              Serial.print(temp2, 2);
+
   Serial.print(",");
   Serial.println(sp, 2);
+}
+
+static inline void tc_all_cs_idle_init_once() {
+  static bool inited = false;
+  if (!inited) {
+    for (int k = 0; k < NUM_THERMOCOUPLES; ++k) {
+      pinMode(TC_CS_PINS[k], OUTPUT);
+      digitalWrite(TC_CS_PINS[k], HIGH); // idle = ไม่เลือกชิป
+    }
+    inited = true;
+  }
+}
+
+static inline void tc_all_cs_idle() {
+  for (int k = 0; k < NUM_THERMOCOUPLES; ++k) {
+    digitalWrite(TC_CS_PINS[k], HIGH);
+  }
 }
