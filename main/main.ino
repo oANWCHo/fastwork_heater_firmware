@@ -5,18 +5,17 @@
  * [MODIFIED]:
  * - Removed Adafruit_MAX31855 library
  * - Integrated manual bit-bang SPI logic from max_seperate.ino
- * to read MAX31855 sensors.
- ****************************************************/
+ * - [CHANGED] Replaced Adafruit_ILI9341 with TFT_eSPI + Sprite for fast,
+ * flicker-free display.
+****************************************************/
 
 // ========== [1) Include Libraries] ==========
-#include <SPI.h>       // Note: SPI.h is not strictly needed by manual code, but good to keep if other SPI devices exist.
+#include <SPI.h>
 #include <Wire.h>
 #include <math.h>
-// #include "Adafruit_MAX31855.h" // <-- REMOVED
 #include "Adafruit_MLX90614.h"
 #include "driver/pcnt.h"
-#include "Adafruit_GFX.h"
-#include "Adafruit_ILI9341.h"
+#include <TFT_eSPI.h>
 #include <Ticker.h>
 
 // ========== [2) Pin Definitions] ==========
@@ -29,18 +28,11 @@
 #define ENCODER_B 39
 #define ENCODER_SW 34
 
-#define TFT_DC    27
-#define TFT_CS    26
-#define TFT_MOSI  13
-#define TFT_MISO  12
-#define TFT_CLK   14
-#define TFT_RST   4
-
 #define IR1_ADDR 0x10
 #define IR2_ADDR 0x11
 
 // --- SSR Output (Burst-Fire) ---
-#define SSR_PIN         25
+#define SSR_PIN     25
 #define TPO_TICK_US     1000
 #define WINDOW_MS_INIT  1000
 
@@ -51,14 +43,12 @@
 
 // ========== [3) Objects & Manual MAX31855 Config] ==========
 
-// [REMOVED] Adafruit_MAX31855 thermocouples[] = { ... };
-
-// [ADDED] Config from max_seperate.ino
-static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 }; // Add more CS pins here if you have >2 sensors
+static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 };
 const int NUM_THERMOCOUPLES = sizeof(TC_CS_PINS) / sizeof(TC_CS_PINS[0]);
-// static_assert(sizeof(TC_CS_PINS)/sizeof(TC_CS_PINS[0]) == NUM_THERMOCOUPLES, "TC_CS_PINS size must match NUM_THERMOCOUPLES"); // Can't use in .ino
 
-Adafruit_ILI9341  tft(TFT_CS, TFT_DC, TFT_MOSI, TFT_CLK, TFT_RST, TFT_MISO);
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite spr = TFT_eSprite(&tft);
+
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
 Ticker tpo_ticker;
@@ -67,9 +57,8 @@ Ticker tpo_ticker;
 long lastEncoderValue = 0;
 int  lastSwitchState  = HIGH;
 
-// [MODIFIED] Storage for manual MAX31855 reading
 float   tc_temp_display[NUM_THERMOCOUPLES]; // thermocouple temperature (°C)
-float   cj_temp_display[NUM_THERMOCOUPLES]; // cold-junction temperature (°C)
+float   cj_temp_display[NUM_THERMOCOUPLES];
 uint8_t tc_fault_bits[NUM_THERMOCOUPLES];   // fault summary per channel
 
 float   ir1_temp_display = NAN;
@@ -84,16 +73,12 @@ bool  has_go_to = false;
 
 const int   ENCODER_COUNTS_PER_STEP = 4;
 const float STEP_SIZE               = 0.5f;
-
 float Kp = 1.0f, Ki = 0.0f, Kd = 0.0f;
 float pid_integral = 0.0f;
 float pid_prev_err = 0.0f;
-
 bool  pwm_override_enabled = false;
 float pwm_override_percent = 0.0f;
 float last_pwm_percent     = 0.0f;
-
-uint16_t COLOR_ORANGE = 0;
 
 // ========== [5) TPO via Hardware Timer] ==========
 portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
@@ -116,7 +101,6 @@ void tpo_set_percent(float percent) {
 void tpo_set_window_ms(uint32_t window_ms) {
   if (window_ms < 100)  window_ms = 100;
   if (window_ms > 5000) window_ms = 5000;
-
   portENTER_CRITICAL(&tpoMux);
   tpo_window_period_ticks = window_ms;
   if (tpo_tick_counter >= tpo_window_period_ticks) tpo_tick_counter = 0;
@@ -145,15 +129,12 @@ void IRAM_ATTR tpo_isr() {
 void updateDisplay();
 void updateControl();
 void read_heater_input();
-void heater_read(); // This will be the manual version
+void heater_read();
+// This will be the manual version
 void read_mlx_sensors();
 void read_hardware_encoder();
 void check_encoder_switch();
 
-// [REMOVED] tc_all_cs_idle_init_once();
-// [REMOVED] tc_all_cs_idle();
-
-// [ADDED] Forward declarations for manual MAX31855 functions
 void max31855_init_pins();
 static inline void all_cs_idle();
 uint32_t max31855_read_raw(int csPin);
@@ -170,12 +151,6 @@ void setup() {
   pinMode(SSR_PIN, OUTPUT);
   digitalWrite(SSR_PIN, LOW);
   pinMode(ENCODER_SW, INPUT_PULLUP);
-
-  // [REMOVED] Manual pinMode/digitalWrite for MAXCS1/2, handled by init
-  // [REMOVED] pinMode(MAXCS1, OUTPUT);
-  // [REMOVED] pinMode(MAXCS2, OUTPUT);
-  // [REMOVED] digitalWrite(MAXCS1, HIGH);
-  // [REMOVED] digitalWrite(MAXCS2, HIGH);
 
   // PCNT (encoder)
   pcnt_config_t pcnt_config = {};
@@ -195,34 +170,35 @@ void setup() {
   pcnt_counter_resume(PCNT_UNIT_0);
 
   Wire.begin();
-  if (!mlx1.begin(IR1_ADDR, &Wire)) { Serial.println("Error connecting to MLX #1 (Addr 0x10)"); while (1) {} }
-  if (!mlx2.begin(IR2_ADDR, &Wire)) { Serial.println("Error connecting to MLX #2 (Addr 0x11)"); while (1) {} }
+  if (!mlx1.begin(IR1_ADDR, &Wire)) {
+    Serial.println("Error connecting to MLX #1 (Addr 0x10)");
+    while (1) {}
+  }
+  if (!mlx2.begin(IR2_ADDR, &Wire)) {
+    Serial.println("Error connecting to MLX #2 (Addr 0x11)");
+    while (1) {}
+  }
 
-  // [REMOVED] Adafruit library init loop
-  // [REMOVED] for (int i = 0; i < NUM_THERMOCOUPLES; i++) { ... }
-
-  // [ADDED] Initialize manual MAX31855 driver
   max31855_init_pins();
   Serial.println("Using manual MAX31855 driver.");
 
-  // [ADDED] Initialize temp arrays
   for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
     tc_temp_display[i] = NAN;
     cj_temp_display[i] = NAN;
     tc_fault_bits[i] = 0;
   }
 
-  tft.begin();
+  tft.init();
   tft.setRotation(0);
-  tft.fillScreen(ILI9341_BLACK);
-  COLOR_ORANGE = tft.color565(255, 165, 0);
-  updateDisplay(); // Draw initial labels
+  tft.fillScreen(TFT_BLACK);
+
+  spr.createSprite(tft.width(), tft.height());
+  spr.setSwapBytes(true); // [CHANGED] For printf compatibility
 
   // TPO setup
   tpo_set_window_ms(WINDOW_MS_INIT);
   tpo_set_percent(0.0f);
   tpo_ticker.attach_ms(1, tpo_isr);
-
   Serial.println("Ready (Ticker 1ms). Use: PWM <0..100>, AUTO, PWM?, WIN=ms");
 }
 
@@ -234,21 +210,17 @@ void loop() {
 
   static uint32_t t_sens = 0, t_disp = 0, t_ctl = 0, t_plot = 0;
   uint32_t now = millis();
-
-  // Read sensors ~100 ms
   if (now - t_sens >= 100) {
     t_sens = now;
-    heater_read(); // Now calls the manual version
+    heater_read();
     read_mlx_sensors();
   }
 
-  // Update control ~50 ms
   if (now - t_ctl >= 50) {
     t_ctl = now;
     updateControl();
   }
 
-  // Update display ~50 ms
   if (now - t_disp >= 50) {
     t_disp = now;
     updateDisplay();
@@ -262,7 +234,6 @@ void loop() {
 
 // ========== [9) Sensor Reading] ==========
 
-// [REPLACED] Replaced with manual logic from max_seperate.ino
 void heater_read() {
   for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
     float tc, tj;
@@ -276,19 +247,14 @@ void heater_read() {
       if (!ok) delayMicroseconds(MAX_GUARD_US);
     }
 
-    if(ok) {
-        tc_temp_display[i] = tc;
-        cj_temp_display[i] = tj;
+    if (ok) {
+      tc_temp_display[i] = tc;
+      cj_temp_display[i] = tj;
     } else {
-        tc_temp_display[i] = NAN; // Store NAN on persistent fault
-        cj_temp_display[i] = NAN;
+      tc_temp_display[i] = NAN;
+      cj_temp_display[i] = NAN;
     }
     tc_fault_bits[i] = fb;
-
-    // Debug print from max_seperate.ino is removed to avoid spamming the plotter.
-    // You can re-enable it if needed:
-    // Serial.printf("TC[%d] RAW=0x%08lX  T=%.2f°C  CJ=%.2f°C  Fault=0x%02X%s\n",
-    //               i, raw, tc, tj, fb, ok ? "" : " (FAULT)");
   }
 }
 
@@ -299,7 +265,7 @@ void read_mlx_sensors() {
   ir1_temp_display = t1;
   ir2_temp_display = t2;
   if (!isnan(t1) && !isnan(t2)) avg_temp_display = (t1 + t2) / 2.0f;
-  else                        avg_temp_display = NAN;
+  else avg_temp_display = NAN;
 }
 
 // ========== [10) Serial Commands: override/auto/status/window] ==========
@@ -317,7 +283,8 @@ void read_heater_input() {
   }
 
   if (up == "PWM?" || up == "STATUS?" || up == "DUTY?") {
-    Serial.print("MODE: "); Serial.println(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)");
+    Serial.print("MODE: ");
+    Serial.println(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)");
     Serial.print("PWM%: "); Serial.println(last_pwm_percent, 2);
     Serial.print("WINDOW_MS: ");
     uint32_t w; portENTER_CRITICAL(&tpoMux); w = tpo_window_period_ticks; portEXIT_CRITICAL(&tpoMux);
@@ -328,7 +295,8 @@ void read_heater_input() {
   if (up.startsWith("WIN")) {
     String val = cmd;
     val.replace("WIN", ""); val.replace("win", "");
-    val.replace(":", " ");  val.replace("=", " ");
+    val.replace(":", " ");
+    val.replace("=", " ");
     val.trim();
     uint32_t w = (uint32_t) val.toInt();
     if (w < 100)  w = 100;
@@ -341,10 +309,12 @@ void read_heater_input() {
   if (up.startsWith("PWM")) {
     String val = cmd;
     val.replace("PWM", ""); val.replace("pwm", "");
-    val.replace(":", " ");  val.replace("=", " ");
+    val.replace(":" , " ");
+    val.replace("=", " ");
     val.trim();
     float pct = val.toFloat();
-    if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
     pwm_override_enabled = true;
     pwm_override_percent = pct;
     tpo_set_percent(pct);
@@ -375,7 +345,7 @@ void check_encoder_switch() {
   int cur = digitalRead(ENCODER_SW);
   switch_state_display = cur;
   if (lastSwitchState == HIGH && cur == LOW) {
-    go_to     = setpoint;
+    go_to = setpoint;
     has_go_to = true;
     pid_integral = 0.0f;
     pid_prev_err = 0.0f;
@@ -396,10 +366,8 @@ void updateControl() {
 
   // Calculate error using the first K-type sensor
   float error = go_to - tc_temp_display[0];
-
   const float DEADBAND = 0.1f;
   if (fabsf(error) < DEADBAND) error = 0.0f;
-
   if (Ki != 0.0f) {
     pid_integral += error;
     const float INTEGRAL_CLAMP = 1000.0f;
@@ -411,7 +379,6 @@ void updateControl() {
 
   float derivative = (error - pid_prev_err);
   pid_prev_err = error;
-
   float u = (Kp * error) + (Ki * pid_integral) + (Kd * derivative);
   if (u < 0.0f) u = 0.0f;
 
@@ -423,130 +390,102 @@ void updateControl() {
 }
 
 // ========== [13) Display] ==========
+// [CHANGED] This function is completely refactored to use the Sprite.
+// This is MUCH simpler and 100% flicker-free.
 void updateDisplay() {
-  static bool ui_inited = false;
-  static int yLine[8], xPos;
 
-  // Renamed prev_tc1/2 for clarity, matches the array access
-  static float   prev_sp = NAN, prev_go = NAN, prev_tc1 = NAN, prev_tc2 = NAN, prev_ir1 = NAN, prev_ir2 = NAN;
-  static int     prev_mode  = -1;
-  static int     prev_pwm   = -1;
+  // [REMOVED] All static "prev_" variables and `ui_inited` check.
+  // We will redraw everything to the sprite buffer every time.
 
+  // Define layout constants
   const uint8_t TXT_SIZE = 2;
   const int     GAP      = 8;
-
-  if (!ui_inited) {
-    tft.setTextWrap(false);
-    tft.setTextSize(TXT_SIZE);
-    tft.setTextColor(COLOR_ORANGE, ILI9341_BLACK);
-
-    const int CHAR_H = 8 * TXT_SIZE;
-    int yStart = 4;
-    xPos = 6;
-    for (int i=0;i<8;i++) yLine[i] = yStart + i * (CHAR_H + GAP);
-    ui_inited = true;
-
-    // Using the re-ordered layout from previous request
-    tft.setCursor(xPos, yLine[0]); tft.print("MODE: ");
-    tft.setCursor(xPos, yLine[1]); tft.print("PWM%: ");
-    tft.setCursor(xPos, yLine[2]); tft.print("SP: ");
-    tft.setCursor(xPos, yLine[3]); tft.print("go_to: ");
-    tft.setCursor(xPos, yLine[4]); tft.print("TC1: ");
-    tft.setCursor(xPos, yLine[5]); tft.print("TC2: ");
-    tft.setCursor(xPos, yLine[6]); tft.print("IR1: ");
-    tft.setCursor(xPos, yLine[7]); tft.print("IR2: ");
+  const int     CHAR_H   = 8 * TXT_SIZE;
+  const int     xPos     = 6;
+  const int     xVal     = xPos + 90;
+  int yStart = 4;
+  int yLine[8];
+  for (int i = 0; i < 8; i++) {
+    yLine[i] = yStart + i * (CHAR_H + GAP);
   }
 
-  int xVal = xPos + 90;
-  const int VAL_W = 140;
-  const int VAL_H = 18;
+  // 1. Clear the sprite (fill with black)
+  spr.fillSprite(TFT_BLACK);
 
-  auto printVal = [&](int y, float v, const char* fmt="%.1f C") {
-    tft.fillRect(xVal, y, VAL_W, VAL_H, ILI9341_BLACK);
-    tft.setCursor(xVal, y);
-    char buf[24]; snprintf(buf, sizeof(buf), fmt, v); tft.print(buf);
-  };
-  auto printTxt = [&](int y, const char* s) {
-    tft.fillRect(xVal, y, VAL_W, VAL_H, ILI9341_BLACK);
-    tft.setCursor(xVal, y); tft.print(s);
-  };
+  // 2. Set text properties
+  spr.setTextWrap(false);
+  spr.setTextSize(TXT_SIZE);
+  spr.setTextColor(TFT_SILVER, TFT_BLACK); // Use built-in TFT_ORANGE
 
-  int mode_now = pwm_override_enabled ? 1 : 0;
-  if (mode_now != prev_mode) { prev_mode = mode_now; printTxt(yLine[0], pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)"); }
+  // 3. Draw all labels and values to the sprite buffer
 
-  int pwm_now = (int)(last_pwm_percent + 0.5f);
-  if (pwm_now != prev_pwm) {
-    prev_pwm = pwm_now;
-    tft.fillRect(xVal, yLine[1], VAL_W, VAL_H, ILI9341_BLACK);
-    tft.setCursor(xVal, yLine[1]); tft.print(pwm_now); tft.print(" %");
-  }
+  // --- MODE ---
+  spr.setCursor(xPos, yLine[0]); spr.print("MODE: ");
+  spr.setCursor(xVal, yLine[0]);
+  spr.print(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)");
 
-  if (setpoint != prev_sp) { prev_sp = setpoint; printVal(yLine[2], prev_sp); }
+  // --- PWM% ---
+  spr.setCursor(xPos, yLine[1]); spr.print("PWM%: ");
+  spr.setCursor(xVal, yLine[1]);
+  spr.printf("%d %%", (int)(last_pwm_percent + 0.5f));
 
-  float go_disp = has_go_to ? go_to : NAN;
-  if (go_disp != prev_go) {
-    prev_go = go_disp;
-    if (has_go_to) printVal(yLine[3], prev_go);
-    else           printTxt(yLine[3], "---");
-  }
+  // --- Setpoint (SP) ---
+  spr.setCursor(xPos, yLine[2]); spr.print("SP: ");
+  spr.setCursor(xVal, yLine[2]);
+  spr.printf("%.1f C", setpoint);
 
-  // [REFACTOR] Update display using the temperature array (This code requires no changes)
-  // [MODIFIED] Do not show "ERR". Keep displaying the last known good value if current read is NAN.
-  if (tc_temp_display[0] != prev_tc1) {
-    if (!isnan(tc_temp_display[0])) { // Only update if the new value is NOT NAN
-        prev_tc1 = tc_temp_display[0];
-        printVal(yLine[4], prev_tc1);
-    } else {
-        // New value is NAN, do nothing.
-        // This will keep the display showing the old 'prev_tc1' value.
-        // If it's NAN from the start, we can show "---".
-        if (isnan(prev_tc1)) { // Only true on the very first run
-            printTxt(yLine[4], "---");
-        }
-    }
-  }
+  // --- Go To ---
+  spr.setCursor(xPos, yLine[3]); spr.print("go_to: ");
+  spr.setCursor(xVal, yLine[3]);
+  if (has_go_to) spr.printf("%.1f C", go_to);
+  else           spr.print("---");
 
-  if (tc_temp_display[1] != prev_tc2) {
-    if (!isnan(tc_temp_display[1])) { // Only update if the new value is NOT NAN
-        prev_tc2 = tc_temp_display[1];
-        printVal(yLine[5], prev_tc2);
-    } else {
-        // New value is NAN, do nothing.
-        if (isnan(prev_tc2)) { // Only true on the very first run
-            printTxt(yLine[5], "---");
-        }
-    }
-  }
+  // --- TC1 ---
+  spr.setCursor(xPos, yLine[4]); spr.print("TC1: ");
+  spr.setCursor(xVal, yLine[4]);
+  if (!isnan(tc_temp_display[0])) spr.printf("%.1f C", tc_temp_display[0]);
+  else                            spr.print("---");
 
-  if (ir1_temp_display != prev_ir1) {
-    prev_ir1 = ir1_temp_display;
-    if(isnan(prev_ir1)) printTxt(yLine[6], "ERR"); else printVal(yLine[6], prev_ir1);
-  }
+  // --- TC2 ---
+  spr.setCursor(xPos, yLine[5]); spr.print("TC2: ");
+  spr.setCursor(xVal, yLine[5]);
+  if (!isnan(tc_temp_display[1])) spr.printf("%.1f C", tc_temp_display[1]);
+  else                            spr.print("---");
 
-  if (ir2_temp_display != prev_ir2) {
-    prev_ir2 = ir2_temp_display;
-    if(isnan(prev_ir2)) printTxt(yLine[7], "ERR"); else printVal(yLine[7], prev_ir2);
-  }
+  // --- IR1 ---
+  spr.setCursor(xPos, yLine[6]); spr.print("IR1: ");
+  spr.setCursor(xVal, yLine[6]);
+  if (!isnan(ir1_temp_display)) spr.printf("%.1f C", ir1_temp_display);
+  else                          spr.print("ERR"); // [CHANGED] Keep "ERR" as per original code
+
+  // --- IR2 ---
+  spr.setCursor(xPos, yLine[7]); spr.print("IR2: ");
+  spr.setCursor(xVal, yLine[7]);
+  if (!isnan(ir2_temp_display)) spr.printf("%.1f C", ir2_temp_display);
+  else                          spr.print("ERR"); // [CHANGED] Keep "ERR" as per original code
+
+  // 4. Push the completed sprite to the screen in one DMA transfer
+  spr.pushSprite(0, 0);
 }
+
 
 void printForSerialPlotter() {
   // [REFACTOR] Get values from the temperature array (This code requires no changes)
   float temp1 = tc_temp_display[0];
   float temp2 = tc_temp_display[1];
   float sp = has_go_to ? go_to : NAN;
-
   if (isnan(sp)) {
     sp = setpoint;
   }
 
   // Print "Temp1,Temp2,Setpoint"
   if (isnan(temp1)) Serial.print(0.0);
-  else              Serial.print(temp1, 2);
+  else               Serial.print(temp1, 2);
 
   Serial.print(",");
 
   if (isnan(temp2)) Serial.print(0.0);
-  else              Serial.print(temp2, 2);
+  else               Serial.print(temp2, 2);
 
   Serial.print(",");
   Serial.println(sp, 2);
@@ -566,7 +505,8 @@ static inline int32_t sign_extend(int32_t v, uint8_t nbits) {
 void max31855_init_pins() {
   pinMode(MAXCLK, OUTPUT);
   pinMode(MAXDO, INPUT_PULLUP);
-  digitalWrite(MAXCLK, LOW);          // CPOL=0 idle LOW
+  digitalWrite(MAXCLK, LOW);
+  // CPOL=0 idle LOW
 
   for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
     pinMode(TC_CS_PINS[i], OUTPUT);
@@ -582,7 +522,6 @@ static inline void all_cs_idle() {
 // Shift out 32-bit frame from MAX31855 (MSB first), sample on SCK rising edge
 uint32_t max31855_read_raw(int csPin) {
   uint32_t v = 0;
-
   all_cs_idle();
   delayMicroseconds(MAX_GUARD_US);
 
@@ -596,7 +535,6 @@ uint32_t max31855_read_raw(int csPin) {
     delayMicroseconds(2);
     int bit = digitalRead(MAXDO);
     v |= (uint32_t(bit) << i);
-
     // Falling edge: device shifts next bit
     digitalWrite(MAXCLK, LOW);
     delayMicroseconds(2);
@@ -619,12 +557,11 @@ uint32_t max31855_read_raw(int csPin) {
 */
 bool max31855_decode(uint32_t raw, float* tc_c, float* tj_c, uint8_t* faults) {
   bool fault = (raw & (1UL << 16));
-
   int32_t tc14 = (raw >> 18) & 0x3FFF;   // 14-bit
   tc14 = sign_extend(tc14, 14);
   float tc = (float)tc14 * 0.25f;
 
-  int32_t tj12 = (raw >> 4) & 0x0FFF;    // 12-bit
+  int32_t tj12 = (raw >> 4) & 0x0FFF; // 12-bit
   tj12 = sign_extend(tj12, 12);
   float tj = (float)tj12 * 0.0625f;
 
@@ -652,11 +589,10 @@ bool max31855_read_celsius(int csPin, float* tc_c, float* tj_c, uint8_t* faults,
 
     return max31855_decode(raw, tc_c, tj_c, faults);
   }
-  
+
   // If all 3 attempts failed
   if (tc_c) *tc_c = NAN;
   if (tj_c) *tj_c = NAN;
   if (faults) *faults = 0xFF; // All fault bits
   return false;
 }
-
