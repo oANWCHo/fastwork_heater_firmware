@@ -73,7 +73,7 @@ bool  has_go_to = false;
 
 const int   ENCODER_COUNTS_PER_STEP = 4;
 const float STEP_SIZE               = 0.5f;
-float Kp = 1.0f, Ki = 0.0f, Kd = 0.0f;
+float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;
 float pid_integral = 0.0f;
 float pid_prev_err = 0.0f;
 bool  pwm_override_enabled = false;
