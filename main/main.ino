@@ -1,11 +1,8 @@
 /****************************************************
- * ESP32 + MAX31855 x2 + MLX90614 x2 + Encoder + ILI9341
+ * ESP32 + MAX31855 x3 + MLX90614 x2 + Encoder + ILI9341
  * Heater control via SSR using Time-Proportioning (Burst Fire)
  *
- * [MODIFIED]:
- * - Integrated new UI State Machine from OvenUI.h
- * - Decoupled Input, Control, and Display logic.
- * - Added Single/Double Click detection.
+ * Final version with complete UI Manager.
  ****************************************************/
 
 // ========== [1) Include Libraries] ==========
@@ -16,112 +13,87 @@
 #include "driver/pcnt.h"
 #include <TFT_eSPI.h>
 #include <Ticker.h>
-
-// --- Our New UI Library ---
-#include "OvenData.h"  // ต้องมาก่อน
-#include "OvenUI.h"    // นี่คือไฟล์ UI ที่เราสร้าง
+#include "ui_manager.h"
 
 // ========== [2) Pin Definitions] ==========
-// ... (เหมือนเดิมทุกประการ) ... [cite: 74]
 #define MAXDO 19   // MISO (Shared)
 #define MAXCLK 18  // SCK (Shared)
-#define MAXCS1 5   // CS for sensor 1
-#define MAXCS2 33  // CS for sensor 2
+#define MAXCS1 32  // CS for sensor 1
+#define MAXCS2 5   // CS for sensor 2
+#define MAXCS3 33  // CS for sensor 3
 
 #define ENCODER_A 36
 #define ENCODER_B 39
 #define ENCODER_SW 34
 
+#define BUZZER 17
+
+#define LED_RED 16
+#define LED_GREEN 0
+
 #define IR1_ADDR 0x10
 #define IR2_ADDR 0x11
+
+// --- SSR Output (Burst-Fire) ---
 #define SSR_PIN 25
 #define TPO_TICK_US 1000
 #define WINDOW_MS_INIT 1000
+
+// --- MAX31855 Manual Driver Config ---
 #ifndef MAX_GUARD_US
 #define MAX_GUARD_US 50
-#define ENCODER_COUNTS_PER_STEP 4
 #endif
 
-// ========== [3) Objects & Global Data] ==========
-
-static const int TC_CS_PINS[] = { MAXCS1, MAXCS2 };
-const int NUM_THERMOCOUPLES = sizeof(TC_CS_PINS) / sizeof(TC_CS_PINS[0]);  // [cite: 76]
+// ========== [3) Objects & Manual MAX31855 Config] ==========
+static const int TC_CS_PINS[] = { MAXCS1, MAXCS2, MAXCS3 };
+const int NUM_THERMOCOUPLES = sizeof(TC_CS_PINS) / sizeof(TC_CS_PINS[0]);
 
 TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite spr = TFT_eSprite(&tft);  // [cite: 76]
-
+UIManager ui(&tft);
+ConfigState config;
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
-Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();  // [cite: 77]
+Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
 Ticker tpo_ticker;
 
-// --- Global Data Structs ---
-OvenSettings g_settings;  // เก็บค่าที่ตั้งค่าไว้ทั้งหมด
-SensorData g_sensors;     // เก็บค่าเซ็นเซอร์ที่อ่านได้
+// ========== [4) Runtime / Display Vars] ==========
+long lastEncoderValue = 0;
+int lastSwitchState = HIGH;
 
-// --- PID & Control Vars ---
-// (ย้าย Kp, Ki, Kd และตัวแปร PID มาไว้ตรงนี้)
-float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;  // [cite: 83]
+float tc_temp_display[NUM_THERMOCOUPLES];
+float cj_temp_display[NUM_THERMOCOUPLES];
+uint8_t tc_fault_bits[NUM_THERMOCOUPLES];
+
+enum ClickState { IDLE, AWAITING_SECOND_CLICK };
+ClickState click_state = IDLE;
+uint32_t first_click_time = 0;
+const uint32_t DOUBLE_CLICK_WINDOW_MS = 400;
+
+float ir1_temp_display = NAN;
+float ir2_temp_display = NAN;
+float avg_temp_display = NAN;
+int16_t encoder_count_display = 0;
+int switch_state_display = HIGH;
+
+// [REMOVED] setpoint is no longer used by the encoder
+// float setpoint = 25.0f;
+
+float go_to = NAN;
+bool has_go_to = false;
+const int ENCODER_COUNTS_PER_STEP = 2;
+
+// [REMOVED] STEP_SIZE is no longer used by the encoder
+// const float STEP_SIZE = 0.5f;
+
+float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;
 float pid_integral = 0.0f;
 float pid_prev_err = 0.0f;
-float last_pwm_percent = 0.0f;  // [cite: 84]
+bool pwm_override_enabled = false;
+float pwm_override_percent = 0.0f;
+float last_pwm_percent = 0.0f;
 
-// ========== [4) Input Handling (New)] ==========
-long lastEncoderValue = 0;
-
-// ฟังก์ชันอ่านค่า Encoder ที่เปลี่ยนไป (Delta)
-int get_encoder_delta() {
-  int16_t current = 0;
-  pcnt_get_counter_value(PCNT_UNIT_0, &current);  // [cite: 135]
-  long delta = (long)current - lastEncoderValue;
-
-  if (delta != 0) {
-    lastEncoderValue = current;
-    return delta;
-  }
-  return 0;
-}
-
-// ฟังก์ชันตรวจจับ Single/Double Click (แบบง่าย)
-ClickType get_click_event() {
-  static uint32_t last_press_time = 0;
-  static uint32_t last_click_time = 0;
-  static int click_count = 0;
-  static int last_state = HIGH;
-
-  const int DEBOUNCE_MS = 50;
-  const int DOUBLE_CLICK_MS = 400;
-
-  ClickType event = CLICK_NONE;
-  int current_state = digitalRead(ENCODER_SW);  //
-
-  if (current_state == LOW && last_state == HIGH) {  // เพิ่งกด
-    if (millis() - last_press_time > DEBOUNCE_MS) {
-      last_press_time = millis();
-    }
-  } else if (current_state == HIGH && last_state == LOW) {  // เพิ่งปล่อย
-    if (millis() - last_press_time > DEBOUNCE_MS) {
-      click_count++;
-      last_click_time = millis();
-    }
-  }
-
-  // ตรวจสอบว่าหมดเวลา Double Click หรือยัง
-  if (click_count > 0 && (millis() - last_click_time > DOUBLE_CLICK_MS)) {
-    if (click_count == 1) {
-      event = CLICK_SINGLE;
-    } else {
-      event = CLICK_DOUBLE;
-    }
-    click_count = 0;
-  }
-
-  last_state = current_state;
-  return event;
-}
-
+uint32_t t_beep_stop = 0;
 
 // ========== [5) TPO via Hardware Timer] ==========
-// ... (เหมือนเดิมทุกประการ) ... [cite: 85-94]
 portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t tpo_window_period_ticks = WINDOW_MS_INIT;
 volatile uint32_t tpo_on_ticks = 0;
@@ -130,14 +102,15 @@ volatile uint32_t tpo_tick_counter = 0;
 void tpo_set_percent(float percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
-  last_pwm_percent = percent;  // [cite: 89]
+  last_pwm_percent = percent;
   uint32_t onTicks = (uint32_t)((percent / 100.0f) * (float)tpo_window_period_ticks + 0.5f);
   portENTER_CRITICAL(&tpoMux);
   tpo_on_ticks = onTicks;
   portEXIT_CRITICAL(&tpoMux);
 }
+
 void tpo_set_window_ms(uint32_t window_ms) {
-  if (window_ms < 100)  window_ms = 100;
+  if (window_ms < 100) window_ms = 100;
   if (window_ms > 5000) window_ms = 5000;
   portENTER_CRITICAL(&tpoMux);
   tpo_window_period_ticks = window_ms;
@@ -145,10 +118,10 @@ void tpo_set_window_ms(uint32_t window_ms) {
   tpo_on_ticks = (uint32_t)((last_pwm_percent / 100.0f) * (float)window_ms + 0.5f);
   portEXIT_CRITICAL(&tpoMux);
 }
+
 void IRAM_ATTR tpo_isr() {
   uint32_t pos;
   uint32_t onTicks;
-
   portENTER_CRITICAL_ISR(&tpoMux);
   pos = tpo_tick_counter;
   onTicks = tpo_on_ticks;
@@ -157,19 +130,16 @@ void IRAM_ATTR tpo_isr() {
     tpo_tick_counter = 0;
   }
   portEXIT_CRITICAL_ISR(&tpoMux);
-
-  bool on = (pos < onTicks);
-  digitalWrite(SSR_PIN, on ? HIGH : LOW);
+  digitalWrite(SSR_PIN, (pos < onTicks) ? HIGH : LOW);
 }
 
-
 // ========== [6) Forward Declarations] ==========
-void updateControl(OvenSettings& settings);  // (ปรับปรุง)
+void updateControl();
 void read_heater_input();
-void heater_read();       // (ปรับปรุง)
-void read_mlx_sensors();  // (ปรับปรุง)
-
-// ... (Manual MAX31855 driver ... เหมือนเดิมทุกประการ) ... [cite: 95-97]
+void heater_read();
+void read_mlx_sensors();
+void read_hardware_encoder();
+void check_encoder_switch();
 void max31855_init_pins();
 static inline void all_cs_idle();
 uint32_t max31855_read_raw(int csPin);
@@ -180,104 +150,134 @@ static inline int32_t sign_extend(int32_t v, uint8_t nbits);
 // ========== [7) Setup] ==========
 void setup() {
   Serial.begin(115200);
-  while (!Serial) { /* no delay */
-  }
+  while (!Serial) {}
+
+  config.start_temps[0] = 50.0f;
+  config.start_temps[1] = 50.0f;
+  config.start_temps[2] = 50.0f;
+  config.max_temps[0] = 200.0f;
+  config.max_temps[1] = 200.0f;
+  config.max_temps[2] = 200.0f;
+  config.max_temp_lock = 300.0f;
+  config.temp_unit = 'C';
+  config.idle_off_mode = IDLE_OFF_ALWAYS_ON;
+  config.light_on = true;
+  config.sound_on = true;
+  
+  // [NEW] Initialize heater active states
+  config.heater_active[0] = false;
+  config.heater_active[1] = false;
+  config.heater_active[2] = false;
+
 
   pinMode(SSR_PIN, OUTPUT);
-  digitalWrite(SSR_PIN, LOW);  // [cite: 99]
+  digitalWrite(SSR_PIN, LOW);
   pinMode(ENCODER_SW, INPUT_PULLUP);
 
   // PCNT (encoder)
   pcnt_config_t pcnt_config = {};
   pcnt_config.pulse_gpio_num = ENCODER_A;
   pcnt_config.ctrl_gpio_num = ENCODER_B;
-  pcnt_config.channel = PCNT_CHANNEL_0;   // [cite: 100]
-  pcnt_config.unit = PCNT_UNIT_0;         // [cite: 101]
-  pcnt_config.pos_mode = PCNT_COUNT_DEC;  // [cite: 102]
+  pcnt_config.channel = PCNT_CHANNEL_0;
+  pcnt_config.unit = PCNT_UNIT_0;
+  pcnt_config.pos_mode = PCNT_COUNT_DEC;
   pcnt_config.neg_mode = PCNT_COUNT_INC;
-  pcnt_config.lctrl_mode = PCNT_MODE_REVERSE;  // [cite: 103]
+  pcnt_config.lctrl_mode = PCNT_MODE_REVERSE;
   pcnt_config.hctrl_mode = PCNT_MODE_KEEP;
   pcnt_unit_config(&pcnt_config);
-  // pcnt_set_filter_value(PCNT_UNIT_0, 100);
-  // pcnt_filter_enable(PCNT_UNIT_0);
+  pcnt_set_filter_value(PCNT_UNIT_0, 1000);
+  pcnt_filter_enable(PCNT_UNIT_0);
   pcnt_counter_pause(PCNT_UNIT_0);
   pcnt_counter_clear(PCNT_UNIT_0);
-  pcnt_counter_resume(PCNT_UNIT_0);  // [cite: 104]
+  pcnt_counter_resume(PCNT_UNIT_0);
 
   Wire.begin();
   if (!mlx1.begin(IR1_ADDR, &Wire)) {
     Serial.println("Error connecting to MLX #1 (Addr 0x10)");
-    while (1) {}  // [cite: 105]
+    while (1) {}
   }
   if (!mlx2.begin(IR2_ADDR, &Wire)) {
     Serial.println("Error connecting to MLX #2 (Addr 0x11)");
-    while (1) {}  // [cite: 106]
+    while (1) {}
   }
 
-  max31855_init_pins();  // [cite: 106]
+  max31855_init_pins();
   Serial.println("Using manual MAX31855 driver.");
+  for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
+    tc_temp_display[i] = NAN;
+    cj_temp_display[i] = NAN;
+    tc_fault_bits[i] = 0;
+  }
 
   tft.init();
-  tft.setRotation(0);
+  tft.setRotation(3);
   tft.fillScreen(TFT_BLACK);
 
-  spr.createSprite(tft.width(), tft.height());  // [cite: 108]
+  ui.begin();
 
   // TPO setup
   tpo_set_window_ms(WINDOW_MS_INIT);
   tpo_set_percent(0.0f);
-  tpo_ticker.attach_ms(1, tpo_isr);  // [cite: 109]
-  Serial.println("Ready. UI State Machine active.");
+  tpo_ticker.attach_ms(1, tpo_isr);
+  Serial.println("Ready (Ticker 1ms). Use: PWM <0..100>, AUTO, PWM?, WIN=ms");
 }
 
-// ========== [8) Main Loop: Refactored] ==========
+// ========== [8) Main Loop: cooperative, no delay()] ==========
 void loop() {
-  // 1. อ่าน Serial (สำหรับ Debug/Override)
+  if (t_beep_stop > 0 && millis() >= t_beep_stop) {
+    // digitalWrite(BUZZER, LOW);
+    t_beep_stop = 0;
+  }
+
+  if (click_state == AWAITING_SECOND_CLICK && millis() - first_click_time > DOUBLE_CLICK_WINDOW_MS) {
+    // The time window closed, so it was just a single click.
+    // [MODIFIED] Pass go_to and has_go_to to be modified by the UI
+    ui.handleButtonSingleClick(config, go_to, has_go_to);
+    click_state = IDLE; // Reset the state
+  }
+
   read_heater_input();
+  read_hardware_encoder();
+  check_encoder_switch();
 
-  // 2. อ่าน Input จาก Encoder และปุ่ม
-  int encoder_delta = get_encoder_delta();
-  ClickType click_event = get_click_event();
-
-  // 3. อัปเดต UI State (ส่ง Input เข้าไป)
-  ui_handle_input(encoder_delta, click_event, g_settings);
-
-  // 4. อ่านเซ็นเซอร์ (ตามรอบเวลา)
-  static uint32_t t_sens = 0;
+  static uint32_t t_sens = 0, t_disp = 0, t_ctl = 0, t_plot = 0;
   uint32_t now = millis();
-  if (now - t_sens >= 100) {  // [cite: 112]
+
+  if (now - t_sens >= 100) {
     t_sens = now;
-    heater_read();       // อัปเดต g_sensors
-    read_mlx_sensors();  // อัปเดต g_sensors
+    heater_read();
+    read_mlx_sensors();
   }
 
-  // 5. อัปเดต Control Loop (ตามรอบเวลา)
-  static uint32_t t_ctl = 0;
-  if (now - t_ctl >= 50) {  // [cite: 113]
+  if (now - t_ctl >= 50) {
     t_ctl = now;
-    updateControl(g_settings);  // ส่ง g_settings เข้าไป
+    updateControl();
   }
 
-  // 6. อัปเดตหน้าจอ (ตามรอบเวลา)
-  static uint32_t t_disp = 0;
-  if (now - t_disp >= 50) {  // [cite: 114]
+  if (now - t_disp >= 50) {
     t_disp = now;
-    // เรียกฟังก์ชันวาดจอหลักจาก OvenUI.h
-    ui_draw(spr, g_sensors, g_settings);
+    AppState current_state;
+    for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
+      current_state.tc_temps[i] = tc_temp_display[i];
+      current_state.tc_faults[i] = tc_fault_bits[i];
+    }
+    current_state.ir_temps[0] = ir1_temp_display;
+    current_state.ir_temps[1] = ir2_temp_display;
+    current_state.is_heating_active = has_go_to;
+    current_state.target_temp = go_to;
+    current_state.temp_unit = config.temp_unit;
+    
+    ui.draw(current_state, config);
   }
 
-  // 7. ส่งค่าไป Serial Plotter (ตามรอบเวลา)
-  static uint32_t t_plot = 0;
-  if (now - t_plot >= 200) {  // [cite: 115]
+  if (now - t_plot >= 200) {
     t_plot = now;
     printForSerialPlotter();
   }
 }
 
-// ========== [9) Sensor Reading (Modified)] ==========
-
+// ========== [9) Sensor Reading] ==========
 void heater_read() {
-  // ... (โค้ดอ่าน MAX31855 เหมือนเดิม) ... [cite: 116-119]
   for (int i = 0; i < NUM_THERMOCOUPLES; ++i) {
     float tc, tj;
     uint8_t fb;
@@ -287,74 +287,66 @@ void heater_read() {
       ok = max31855_read_celsius(TC_CS_PINS[i], &tc, &tj, &fb, &raw);
       if (!ok) delayMicroseconds(MAX_GUARD_US);
     }
-
-    // [MODIFIED] อัปเดตค่าไปยัง Global Struct
-    if (i == 0) {
-      g_sensors.TC1 = ok ? tc : NAN;  // [cite: 119-121]
-      g_sensors.TC1_CJ = ok ? tj : NAN;
-    } else if (i == 1) {
-      g_sensors.TC2 = ok ? tc : NAN;
-      g_sensors.TC2_CJ = ok ? tj : NAN;
+    if (ok) {
+      tc_temp_display[i] = tc;
+      cj_temp_display[i] = tj;
+    } else {
+      tc_temp_display[i] = NAN;
+      cj_temp_display[i] = NAN;
     }
+    tc_fault_bits[i] = fb;
   }
 }
 
 void read_mlx_sensors() {
   float t1 = mlx1.readObjectTempC();
   float t2 = mlx2.readObjectTempC();
-  // [MODIFIED] อัปเดตค่าไปยัง Global Struct
-  if (!isnan(t1) && !isnan(t2)) g_sensors.IR_Avg = (t1 + t2) / 2.0f;  //
-  else g_sensors.IR_Avg = NAN;
+  ir1_temp_display = t1;
+  ir2_temp_display = t2;
+  if (!isnan(t1) && !isnan(t2)) avg_temp_display = (t1 + t2) / 2.0f;
+  else avg_temp_display = NAN;
 }
 
 // ========== [10) Serial Commands] ==========
-// ... (เหมือนเดิมทุกประการ) ... [cite: 123-134]
-// (หมายเหตุ: Serial commands จะ override UI)
-bool pwm_override_enabled = false;
-float pwm_override_percent = 0.0f;
 void read_heater_input() {
-if (Serial.available() <= 0) return;
-
+  if (Serial.available() <= 0) return;
   String cmd = Serial.readStringUntil('\n');
   cmd.trim();
-  String up = cmd; up.toUpperCase();
-
+  String up = cmd;
+  up.toUpperCase();
   if (up == "AUTO") {
     pwm_override_enabled = false;
     Serial.println("MODE=AUTO(PID)");
     return;
   }
-
   if (up == "PWM?" || up == "STATUS?" || up == "DUTY?") {
     Serial.print("MODE: ");
     Serial.println(pwm_override_enabled ? "OVERRIDE" : "AUTO(PID)");
-    Serial.print("PWM%: "); Serial.println(last_pwm_percent, 2);
+    Serial.print("PWM%: ");
+    Serial.println(last_pwm_percent, 2);
     Serial.print("WINDOW_MS: ");
-    uint32_t w; portENTER_CRITICAL(&tpoMux); w = tpo_window_period_ticks; portEXIT_CRITICAL(&tpoMux);
+    uint32_t w;
+    portENTER_CRITICAL(&tpoMux);
+    w = tpo_window_period_ticks;
+    portEXIT_CRITICAL(&tpoMux);
     Serial.println(w);
     return;
   }
-
   if (up.startsWith("WIN")) {
     String val = cmd;
-    val.replace("WIN", ""); val.replace("win", "");
-    val.replace(":", " ");
-    val.replace("=", " ");
-    val.trim();
-    uint32_t w = (uint32_t) val.toInt();
-    if (w < 100)  w = 100;
+    val.replace("WIN", ""); val.replace("win", ""); val.replace(":", " ");
+    val.replace("=", " "); val.trim();
+    uint32_t w = (uint32_t)val.toInt();
+    if (w < 100) w = 100;
     if (w > 5000) w = 5000;
     tpo_set_window_ms(w);
     Serial.print("WINDOW_MS="); Serial.println(w);
     return;
   }
-
   if (up.startsWith("PWM")) {
     String val = cmd;
-    val.replace("PWM", ""); val.replace("pwm", "");
-    val.replace(":" , " ");
-    val.replace("=", " ");
-    val.trim();
+    val.replace("PWM", ""); val.replace("pwm", ""); val.replace(":", " ");
+    val.replace("=", " "); val.trim();
     float pct = val.toFloat();
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
@@ -364,38 +356,58 @@ if (Serial.available() <= 0) return;
     Serial.print("MODE=OVERRIDE, PWM%="); Serial.println(pct, 2);
     return;
   }
+  Serial.println("Unknown. Use: PWM <0..100>, AUTO, PWM?, WIN=<100..5000>");
 }
 
-
 // ========== [11) Encoder] ==========
-// (ฟังก์ชันเดิมถูกย้ายและแทนที่ด้วย get_encoder_delta() และ get_click_event())
-
-
-// ========== [12) Control (Modified)] ==========
-void updateControl(OvenSettings& settings) {
-  if (pwm_override_enabled) {  // Serial override ชนะทุกสิ่ง [cite: 141]
-    return;
+void read_hardware_encoder() {
+  int16_t current = 0;
+  pcnt_get_counter_value(PCNT_UNIT_0, &current);
+  encoder_count_display = current;
+  long delta = (long)current - lastEncoderValue;
+  if (delta != 0) {
+    float steps = (float)delta / (float)ENCODER_COUNTS_PER_STEP;
+    
+    // [MODIFIED] Encoder rotation is only handled by the UI now
+    ui.handleEncoderRotation(steps, config);
+    
+    lastEncoderValue = current;
   }
+}
 
-  // *** นี่คือส่วนที่ต้องขยาย ***
-  // ปัจจุบันโค้ดจะคุมเฉพาะ Heater 1 เท่านั้น
+void check_encoder_switch() {
+  int cur = digitalRead(ENCODER_SW);
+  switch_state_display = cur;
+  if (lastSwitchState == HIGH && cur == LOW) { // On button press
+    if (config.sound_on) {
+      t_beep_stop = millis() + 50;
+    }
+    if (click_state == IDLE) {
+      click_state = AWAITING_SECOND_CLICK;
+      first_click_time = millis();
+    } else {
+      // This is a double-click
+      ui.handleButtonDoubleClick(config);
+      click_state = IDLE;
+    }
+  }
+  lastSwitchState = cur;
+}
 
-  // ถ้า Heater 1 ไม่ได้สั่งทำงาน
-  if (!settings.heater_running[0]) {
+// ========== [12) Control] ==========
+void updateControl() {
+  if (pwm_override_enabled) return;
+  
+  if (!has_go_to) {
     tpo_set_percent(0);
     return;
   }
-
-  // ใช้ TC1 เป็นเซ็นเซอร์ควบคุม [cite: 142]
-  if (isnan(g_sensors.TC1)) {
+  
+  if (isnan(tc_temp_display[0])) {
     tpo_set_percent(0);
     return;
   }
-
-  // ใช้ค่า "Start Temp" จาก settings (แทน go_to เดิม)
-  float error = settings.heater_start_temp[0] - g_sensors.TC1;
-
-  // ... (PID Logic เหมือนเดิม) ... [cite: 144-150]
+  float error = go_to - tc_temp_display[0];
   const float DEADBAND = 0.1f;
   if (fabsf(error) < DEADBAND) error = 0.0f;
   if (Ki != 0.0f) {
@@ -413,34 +425,27 @@ void updateControl(OvenSettings& settings) {
   const float U_SCALE = 100.0f;
   float percent = u * (100.0f / U_SCALE);
   if (percent > 100.0f) percent = 100.0f;
-
   tpo_set_percent(percent);
 }
 
-// ========== [13) Display] ==========
-// (ฟังก์ชัน updateDisplay() เดิม [cite: 151] ถูกลบออกทั้งหมด และแทนที่ด้วย ui_draw() ใน OvenUI.h)
-
+// ========== [13) Serial Plotter] ==========
 void printForSerialPlotter() {
-  // [MODIFIED] อ่านค่าจาก g_sensors และ g_settings
-  float temp1 = g_sensors.TC1;                                                    // [cite: 173]
-  float temp2 = g_sensors.TC2;                                                    // [cite: 174]
-  float sp = g_settings.heater_running[0] ? g_settings.heater_start_temp[0] : NAN;  // [cite: 174]
-
-  if (isnan(sp)) sp = 0.0;  // Plotter ไม่ชอบ NAN
+  float temp1 = tc_temp_display[0];
+  float temp2 = tc_temp_display[1];
+  float sp = has_go_to ? go_to : NAN;
 
   if (isnan(temp1)) Serial.print(0.0);
-  else Serial.print(temp1, 2);  // [cite: 176]
-
+  else Serial.print(temp1, 2);
   Serial.print(",");
   if (isnan(temp2)) Serial.print(0.0);
-  else Serial.print(temp2, 2);  // [cite: 177]
+  else Serial.print(temp2, 2);
   Serial.print(",");
-  Serial.println(sp, 2);  // [cite: 178]
+  
+  if (isnan(sp)) Serial.println(0.0);
+  else Serial.println(sp, 2);
 }
 
-
 // ========== [14) Manual MAX31855 Driver Functions] ==========
-// ... (เหมือนเดิมทุกประการ) ... [cite: 179-197]
 static inline int32_t sign_extend(int32_t v, uint8_t nbits) {
   int32_t shift = 32 - nbits;
   return (v << shift) >> shift;
