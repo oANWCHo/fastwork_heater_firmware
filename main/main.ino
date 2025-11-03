@@ -1,5 +1,5 @@
 /****************************************************
- * ESP32 + MAX31855 x3 + MLX90614 x2 + Encoder + ILI9341
+ * ESP32 + MAX31855 x3 + MLX910614 x2 + Encoder + ILI9341
  * Heater control via SSR using Time-Proportioning (Burst Fire)
  *
  * Final version with complete UI Manager.
@@ -14,6 +14,7 @@
 #include <TFT_eSPI.h>
 #include <Ticker.h>
 #include "ui_manager.h"
+#include <Preferences.h>
 
 // ========== [2) Pin Definitions] ==========
 #define MAXDO 19   // MISO (Shared)
@@ -47,14 +48,16 @@
 // ========== [3) Objects & Manual MAX31855 Config] ==========
 static const int TC_CS_PINS[] = { MAXCS1, MAXCS2, MAXCS3 };
 const int NUM_THERMOCOUPLES = sizeof(TC_CS_PINS) / sizeof(TC_CS_PINS[0]);
-
 TFT_eSPI tft = TFT_eSPI();
-UIManager ui(&tft);
+
+Preferences preferences; // <-- ADD THIS
+void saveConfig(const ConfigState& config); // <-- ADD THIS (Forward declaration)
+UIManager ui(&tft, saveConfig);
+
 ConfigState config;
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
 Ticker tpo_ticker;
-
 // ========== [4) Runtime / Display Vars] ==========
 long lastEncoderValue = 0;
 int lastSwitchState = HIGH;
@@ -74,15 +77,9 @@ float avg_temp_display = NAN;
 int16_t encoder_count_display = 0;
 int switch_state_display = HIGH;
 
-// [REMOVED] setpoint is no longer used by the encoder
-// float setpoint = 25.0f;
-
 float go_to = NAN;
 bool has_go_to = false;
 const int ENCODER_COUNTS_PER_STEP = 2;
-
-// [REMOVED] STEP_SIZE is no longer used by the encoder
-// const float STEP_SIZE = 0.5f;
 
 float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;
 float pid_integral = 0.0f;
@@ -93,12 +90,16 @@ float last_pwm_percent = 0.0f;
 
 uint32_t t_beep_stop = 0;
 
+// ** ADDED ** State for max temp cutoff blinking
+bool heater_cutoff_state[NUM_THERMOCOUPLES] = {false, false, false};
+uint32_t heater_cutoff_start_time[NUM_THERMOCOUPLES] = {0, 0, 0};
+const uint32_t CUTOFF_BLINK_DURATION_MS = 10000; // 10 seconds
+
 // ========== [5) TPO via Hardware Timer] ==========
 portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t tpo_window_period_ticks = WINDOW_MS_INIT;
 volatile uint32_t tpo_on_ticks = 0;
 volatile uint32_t tpo_tick_counter = 0;
-
 void tpo_set_percent(float percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
@@ -133,6 +134,24 @@ void IRAM_ATTR tpo_isr() {
   digitalWrite(SSR_PIN, (pos < onTicks) ? HIGH : LOW);
 }
 
+void saveConfig(const ConfigState& config) {
+  // Save the entire config struct as a blob of bytes
+  preferences.putBytes("config", &config, sizeof(config));
+  Serial.println("Configuration saved to flash.");
+}
+
+void loadConfig(ConfigState& config) {
+  // Check if a saved config exists and is the correct size
+  if (preferences.getBytesLength("config") == sizeof(config)) {
+    preferences.getBytes("config", &config, sizeof(config));
+    Serial.println("Configuration loaded from flash.");
+  } else {
+    Serial.println("No valid config found, using defaults and saving.");
+    // If no config is found, save the current defaults for next time
+    saveConfig(config);
+  }
+}
+
 // ========== [6) Forward Declarations] ==========
 void updateControl();
 void read_heater_input();
@@ -150,11 +169,12 @@ static inline int32_t sign_extend(int32_t v, uint8_t nbits);
 // ========== [7) Setup] ==========
 void setup() {
   Serial.begin(115200);
+  preferences.begin("app_config", false);
   while (!Serial) {}
 
-  config.start_temps[0] = 50.0f;
-  config.start_temps[1] = 50.0f;
-  config.start_temps[2] = 50.0f;
+  config.target_temps[0] = 50.0f;
+  config.target_temps[1] = 50.0f;
+  config.target_temps[2] = 50.0f;
   config.max_temps[0] = 200.0f;
   config.max_temps[1] = 200.0f;
   config.max_temps[2] = 200.0f;
@@ -163,12 +183,11 @@ void setup() {
   config.idle_off_mode = IDLE_OFF_ALWAYS_ON;
   config.light_on = true;
   config.sound_on = true;
-  
-  // [NEW] Initialize heater active states
   config.heater_active[0] = false;
   config.heater_active[1] = false;
   config.heater_active[2] = false;
 
+  loadConfig(config);
 
   pinMode(SSR_PIN, OUTPUT);
   digitalWrite(SSR_PIN, LOW);
@@ -229,20 +248,25 @@ void loop() {
     t_beep_stop = 0;
   }
 
+  // ** ADDED ** Manage the cutoff blink state timer
+  for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
+    if (heater_cutoff_state[i]) {
+      if (millis() - heater_cutoff_start_time[i] > CUTOFF_BLINK_DURATION_MS) {
+        heater_cutoff_state[i] = false; // Stop blinking after 10 seconds
+      }
+    }
+  }
+
   if (click_state == AWAITING_SECOND_CLICK && millis() - first_click_time > DOUBLE_CLICK_WINDOW_MS) {
-    // The time window closed, so it was just a single click.
-    // [MODIFIED] Pass go_to and has_go_to to be modified by the UI
     ui.handleButtonSingleClick(config, go_to, has_go_to);
-    click_state = IDLE; // Reset the state
+    click_state = IDLE;
   }
 
   read_heater_input();
   read_hardware_encoder();
   check_encoder_switch();
-
   static uint32_t t_sens = 0, t_disp = 0, t_ctl = 0, t_plot = 0;
   uint32_t now = millis();
-
   if (now - t_sens >= 100) {
     t_sens = now;
     heater_read();
@@ -260,6 +284,8 @@ void loop() {
     for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
       current_state.tc_temps[i] = tc_temp_display[i];
       current_state.tc_faults[i] = tc_fault_bits[i];
+      // ** ADDED ** Pass cutoff state to UI
+      current_state.heater_cutoff_state[i] = heater_cutoff_state[i];
     }
     current_state.ir_temps[0] = ir1_temp_display;
     current_state.ir_temps[1] = ir2_temp_display;
@@ -367,10 +393,7 @@ void read_hardware_encoder() {
   long delta = (long)current - lastEncoderValue;
   if (delta != 0) {
     float steps = (float)delta / (float)ENCODER_COUNTS_PER_STEP;
-    
-    // [MODIFIED] Encoder rotation is only handled by the UI now
     ui.handleEncoderRotation(steps, config);
-    
     lastEncoderValue = current;
   }
 }
@@ -386,7 +409,6 @@ void check_encoder_switch() {
       click_state = AWAITING_SECOND_CLICK;
       first_click_time = millis();
     } else {
-      // This is a double-click
       ui.handleButtonDoubleClick(config);
       click_state = IDLE;
     }
@@ -407,6 +429,24 @@ void updateControl() {
     tpo_set_percent(0);
     return;
   }
+
+  // ** MODIFIED ** Added logic to trigger cutoff state
+  // Safety override: if temp exceeds max setting, turn off SSR and start blinking
+  if (tc_temp_display[0] >= config.max_temps[0]) {
+    tpo_set_percent(0);
+    pid_integral = 0.0f;
+    pid_prev_err = 0.0f;
+    
+    // Stop control and trigger the blinking state
+    has_go_to = false;
+    go_to = NAN;
+    config.heater_active[0] = false; // Set heater to inactive (button will become white after blink)
+    heater_cutoff_state[0] = true;   // Start the blink
+    heater_cutoff_start_time[0] = millis();
+
+    return;
+  }
+
   float error = go_to - tc_temp_display[0];
   const float DEADBAND = 0.1f;
   if (fabsf(error) < DEADBAND) error = 0.0f;

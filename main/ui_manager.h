@@ -6,7 +6,7 @@
 enum UIScreen {
   SCREEN_STANDBY,
   SCREEN_SETTINGS_MAIN,
-  SCREEN_SETTINGS_HEATER_START_TEMP,
+  SCREEN_SETTINGS_HEATER_TARGET_TEMP,
   SCREEN_SETTINGS_HEATER_MAX_TEMP,
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
@@ -36,14 +36,14 @@ enum IdleOffMode {
 };
 
 struct ConfigState {
-  float start_temps[3];
+  float target_temps[3];
   float max_temps[3];
   float max_temp_lock;
   char temp_unit;
   IdleOffMode idle_off_mode;
   bool light_on;
   bool sound_on;
-  bool heater_active[3]; // [NEW] To store ON/OFF state for H1, H2, H3
+  bool heater_active[3];
 };
 
 struct AppState {
@@ -53,17 +53,19 @@ struct AppState {
   float target_temp;
   char temp_unit;
   uint8_t tc_faults[3];
+  // ** ADDED ** Array to hold cutoff state for each heater
+  bool heater_cutoff_state[3];
 };
+
+typedef void (*ConfigSaveCallback)(const ConfigState& config);
 
 class UIManager {
 public:
-  UIManager(TFT_eSPI* tft);
+  UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback = nullptr);
   void begin();
   
-  // [MODIFIED] Draw function signature
   void draw(const AppState& state, const ConfigState& config);
   
-  // [MODIFIED] Single click needs to set go_to vars
   bool handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to);
   
   bool handleButtonDoubleClick(ConfigState& config);
@@ -80,8 +82,11 @@ private:
   
   int _standby_selection;
 
+  ConfigSaveCallback _save_callback;
+
   void drawStandbyScreen(const AppState& state, const ConfigState& config);
-  void drawSettingsMain(const AppState& state, const ConfigState& config);    void drawSettingsHeaterStartTemp(const AppState& state);
+  void drawSettingsMain(const AppState& state, const ConfigState& config);
+  void drawSettingsHeaterTargetTemp(const AppState& state);
   void drawSettingsHeaterMaxTemp(const AppState& state);
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
