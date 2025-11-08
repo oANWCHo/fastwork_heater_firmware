@@ -8,6 +8,7 @@ enum UIScreen {
   SCREEN_SETTINGS_MAIN,
   SCREEN_SETTINGS_HEATER_TARGET_TEMP,
   SCREEN_SETTINGS_HEATER_MAX_TEMP,
+  SCREEN_SETTINGS_HEATER_CALIBRATE,
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
   SCREEN_SETTINGS_LIGHT_SOUND,
@@ -44,6 +45,7 @@ struct ConfigState {
   bool light_on;
   bool sound_on;
   bool heater_active[3];
+  float tc_offsets[3];
 };
 
 struct AppState {
@@ -92,6 +94,7 @@ private:
   void drawSettingsMain(const AppState& state, const ConfigState& config);
   void drawSettingsHeaterTargetTemp(const AppState& state);
   void drawSettingsHeaterMaxTemp(const AppState& state);
+  void drawSettingsHeaterCalibrate(const AppState& state);
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
   void drawSettingsLightSound(const AppState& state, const ConfigState& config);

@@ -53,6 +53,7 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP: drawSettingsHeaterTargetTemp(state); break;
     case SCREEN_SETTINGS_HEATER_MAX_TEMP: drawSettingsHeaterMaxTemp(state); break;
     case SCREEN_SETTINGS_MAX_TEMP_LOCK:   drawSettingsMaxTempLock(state); break;
+    case SCREEN_SETTINGS_HEATER_CALIBRATE:  drawSettingsHeaterCalibrate(state); break;
     case SCREEN_SETTINGS_IDLE_OFF:        drawSettingsIdleOff(state, config); break;
     case SCREEN_SETTINGS_LIGHT_SOUND:     drawSettingsLightSound(state, config); break;
     case SCREEN_SETTINGS_TEMP_UNIT:       drawSettingsTempUnit(state, config); break;
@@ -97,9 +98,38 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           config.heater_active[2] = !config.heater_active[2];
           break;
 	      case 3: // "start"
-          if (config.target_temps[0] <= config.max_temp_lock) {
-            go_to = config.target_temps[0];
-            has_go_to = true;
+          { // Braces create a new scope for variables
+            bool allow_start = true;
+            bool any_active = false;
+            
+            // Loop through all 3 heaters
+            for (int i = 0; i < 3; i++) {
+              // Only check heaters that are toggled on
+              if (config.heater_active[i]) {
+                any_active = true;
+                
+                // Check against the global max temp lock
+                if (config.target_temps[i] > config.max_temp_lock) {
+                  allow_start = false;
+                  break; // Found a violation, no need to check others
+                }
+                
+                // Also check against its own individual max temp
+                if (config.target_temps[i] > config.max_temps[i]) {
+                  allow_start = false;
+                  break; // Found a violation
+                }
+              }
+            }
+
+            // Only start if one heater is active AND all are safe
+            if (any_active && allow_start) {
+              has_go_to = true;
+              go_to = NAN; // 'go_to' is no longer used for targets
+            } else {
+              has_go_to = false; // Stay off
+              go_to = NAN;
+            }
           }
           break;
         case 4: // "stop"
@@ -156,6 +186,14 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
 
     case SCREEN_SETTINGS_HEATER_MAX_TEMP:
       config.max_temps[_selected_menu_item] = _temp_edit_value;
+      if (_save_callback) _save_callback(config);
+      _current_screen = SCREEN_SETTINGS_HEATER_CALIBRATE;
+      _temp_edit_value = config.tc_offsets[_selected_menu_item];
+      _menu_step_accumulator = 0.0f;
+      return true;
+
+    case SCREEN_SETTINGS_HEATER_CALIBRATE:
+      config.tc_offsets[_selected_menu_item] = _temp_edit_value; // Save the offset
       if (_save_callback) _save_callback(config);
       _current_screen = SCREEN_SETTINGS_MAIN;
       _menu_step_accumulator = 0.0f;
@@ -215,6 +253,10 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
       _current_screen = SCREEN_SETTINGS_HEATER_TARGET_TEMP;
       _temp_edit_value = config.target_temps[_selected_menu_item];
       break;
+    case SCREEN_SETTINGS_HEATER_CALIBRATE:
+      _current_screen = SCREEN_SETTINGS_HEATER_MAX_TEMP;
+      _temp_edit_value = config.max_temps[_selected_menu_item];
+      break;
     default: return false;
   }
   _menu_step_accumulator = 0.0f;
@@ -259,6 +301,16 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       }
       break;
     }
+
+    case SCREEN_SETTINGS_HEATER_CALIBRATE: {
+      // Use a smaller step (0.1) for calibration
+      _temp_edit_value += (float)change * 0.1f;
+      // Allow negative offsets, clamp between -20 and +20
+      if (_temp_edit_value < -20.0f) _temp_edit_value = -20.0f;
+      if (_temp_edit_value > 20.0f) _temp_edit_value = 20.0f;
+      break;
+    }
+
     case SCREEN_SETTINGS_MAX_TEMP_LOCK: {
       _temp_edit_value += (float)change * 0.5f;
       if (_temp_edit_value < 0) _temp_edit_value = 0;
@@ -331,8 +383,22 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     int y = 4 + i * LINE_SPACING;
     
     uint16_t bg_color = COLOR_IDLE;
-    if (i == 0 && config.heater_active[0]) {
-        bg_color = getStatusColor(state.is_heating_active, temps_c[i], state.target_temp);
+    // if (i == 0 && config.heater_active[0]) {
+    //     bg_color = getStatusColor(state.is_heating_active, temps_c[i], state.target_temp);
+    // }
+
+    if (i < 3) {
+      // Check if this specific heater is toggled on
+      if (config.heater_active[i]) {
+        // If system is running, get the full status color
+        if (state.is_heating_active) {
+          float current_target_temp = config.target_temps[i];
+          bg_color = getStatusColor(true, temps_c[i], current_target_temp);
+        } else {
+          // If system is not running, just show "armed" color
+          bg_color = COLOR_ACTIVE; 
+        }
+      }
     }
 
     if (temps_c[i] > 270.0f && _blink_state) {
@@ -340,7 +406,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
     _spr.fillRect(0, y, _spr.width(), LINE_SPACING, bg_color);
 
-    if (i == 0 && state.is_heating_active) {
+    if (i < 3 && config.heater_active[i] && state.is_heating_active) {
       float progress = (millis() % 1500) / 1500.0f;
       int bar_width = (int)((_spr.width() - 4) * progress);
       _spr.fillRect(2, y + LINE_SPACING - 4, bar_width, 3, TFT_CYAN);
@@ -546,6 +612,32 @@ void UIManager::drawSettingsHeaterMaxTemp(const AppState& state) {
   float display_value = convertTemp(_temp_edit_value, state.temp_unit);
   snprintf(temp_buffer, sizeof(temp_buffer), "Max Temp: %.1f %c", display_value, state.temp_unit);
   _spr.drawString(temp_buffer, _spr.width() / 2, _spr.height() / 2);
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.setTextDatum(BC_DATUM);
+  _spr.setTextSize(1);
+  _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
+}
+
+void UIManager::drawSettingsHeaterCalibrate(const AppState& state) {
+  _spr.fillSprite(TFT_BLACK);
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(TC_DATUM);
+  _spr.setTextSize(2);
+  char title_buffer[20];
+  snprintf(title_buffer, sizeof(title_buffer), "Heater (%d)", _selected_menu_item + 1);
+  _spr.drawString(title_buffer, _spr.width() / 2, 20);
+  
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.drawString("Calibration Offset", _spr.width() / 2, 60);
+
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(MC_DATUM);
+  _spr.setTextSize(2);
+  char temp_buffer[30];
+  // Calibration is always in 'C', so we don't convert units
+  snprintf(temp_buffer, sizeof(temp_buffer), "Offset: %.1f C", _temp_edit_value);
+  _spr.drawString(temp_buffer, _spr.width() / 2, _spr.height() / 2);
+  
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
   _spr.setTextDatum(BC_DATUM);
   _spr.setTextSize(1);

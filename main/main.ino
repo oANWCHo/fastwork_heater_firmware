@@ -208,6 +208,9 @@ void setup() {
   config.heater_active[1] = false;
   config.heater_active[2] = false;
 
+  config.tc_offsets[0] = 0.0f;
+  config.tc_offsets[1] = 0.0f;
+  config.tc_offsets[2] = 0.0f;
   loadConfig(config);
 
   pinMode(SSR_PIN1, OUTPUT);
@@ -347,7 +350,7 @@ void heater_read() {
       if (!ok) delayMicroseconds(MAX_GUARD_US);
     }
     if (ok) {
-      tc_temp_display[i] = tc;
+      tc_temp_display[i] = tc + config.tc_offsets[i];
       cj_temp_display[i] = tj;
     } else {
       tc_temp_display[i] = NAN;
@@ -486,14 +489,14 @@ void updateControl() {
 
     // 1. Check if this specific heater is active (toggled on in UI)
     if (!config.heater_active[i]) {
-      tpo_set_percent(i, 0); // Not active, make sure it's off
-      continue; // Move to the next heater
+      tpo_set_percent(i, 0);  // Not active, make sure it's off
+      continue;               // Move to the next heater
     }
 
     // 2. Check for bad sensor
     if (isnan(tc_temp_display[i])) {
-      tpo_set_percent(i, 0); // Sensor fault, turn off
-      continue; // Move to the next heater
+      tpo_set_percent(i, 0);  // Sensor fault, turn off
+      continue;               // Move to the next heater
     }
 
     // 3. Safety Max Temp Cutoff
@@ -514,10 +517,10 @@ void updateControl() {
       }
       if (!any_active) {
         has_go_to = false;
-        go_to = NAN; // Clear display temp
+        go_to = NAN;  // Clear display temp
       }
 
-      continue; // Move to the next heater
+      continue;  // Move to the next heater
     }
 
     // 4. PID Calculation
