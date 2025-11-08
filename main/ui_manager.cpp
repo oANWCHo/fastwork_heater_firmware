@@ -8,6 +8,7 @@
 #define COLOR_START   0x07E0 // Green
 #define COLOR_STOP    0xF800 // Red
 
+const uint32_t INACTIVITY_TIMEOUT_MS = 10000;
 
 const char* menu_item_labels[MENU_ITEM_COUNT] = {
   "Heater 1", "Heater 2", "Heater 3", "Maximum Temperature Lock",
@@ -36,6 +37,7 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback)
 void UIManager::begin() {
   _spr.createSprite(_tft->width(), _tft->height());
   _spr.setSwapBytes(true);
+  _last_activity_time = millis();
 }
 
 void UIManager::draw(const AppState& state, const ConfigState& config) {
@@ -59,7 +61,29 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
   _spr.pushSprite(0, 0);
 }
 
+void UIManager::resetInactivityTimer() { // <-- ADD THIS WHOLE FUNCTION
+  _last_activity_time = millis();
+}
+
+void UIManager::checkInactivity() { // <-- ADD THIS WHOLE FUNCTION
+  // Only check if we are NOT on the standby screen
+  if (_current_screen != SCREEN_STANDBY) {
+    if (millis() - _last_activity_time > INACTIVITY_TIMEOUT_MS) {
+      // Inactivity detected, go back to standby
+      _current_screen = SCREEN_STANDBY;
+      // Reset menu states to default
+      _menu_step_accumulator = 0.0f;
+      _selected_menu_item = 0;
+      _standby_selection = 0;
+      _last_activity_time = millis(); // Reset timer
+    }
+  } else {
+    // If we are on standby, just keep resetting the timer
+    resetInactivityTimer();
+  }
+}
 bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to) {
+  resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_STANDBY:
       switch (_standby_selection) {
@@ -171,6 +195,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
 }
 
 bool UIManager::handleButtonDoubleClick(ConfigState& config) {
+  resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_SETTINGS_MAIN:
     case SCREEN_SETTINGS_ABOUT:
@@ -197,6 +222,7 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
 }
 
 bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
+  resetInactivityTimer();
   _menu_step_accumulator += steps;
   int change = (int)_menu_step_accumulator;
   if (change == 0) return true;

@@ -71,6 +71,9 @@ public:
   bool handleButtonDoubleClick(ConfigState& config);
   bool handleEncoderRotation(float steps, ConfigState& config);
 
+  void checkInactivity(); 
+  void resetInactivityTimer();
+
 private:
   TFT_eSPI* _tft;
   TFT_eSprite _spr;
@@ -81,6 +84,7 @@ private:
   float _temp_edit_value;
   
   int _standby_selection;
+  uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
 
