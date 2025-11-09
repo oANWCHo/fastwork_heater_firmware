@@ -5,10 +5,12 @@
 
 enum UIScreen {
   SCREEN_STANDBY,
-  SCREEN_SETTINGS_MAIN,
+  SCREEN_SETTINGS_PAGE_1, 
+  SCREEN_SETTINGS_PAGE_2, 
   SCREEN_SETTINGS_HEATER_TARGET_TEMP,
   SCREEN_SETTINGS_HEATER_MAX_TEMP,
-  SCREEN_SETTINGS_HEATER_CALIBRATE,
+  SCREEN_SETTINGS_HEATER_CALIBRATE, // This screen is now re-used
+  SCREEN_SETTINGS_CALIBRATION_SELECT, // <-- ADDED: Screen to select which heater to calibrate
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
   SCREEN_SETTINGS_LIGHT_SOUND,
@@ -16,16 +18,25 @@ enum UIScreen {
   SCREEN_SETTINGS_ABOUT
 };
 
-enum MenuItem {
-  MENU_HEATER_1,
-  MENU_HEATER_2,
-  MENU_HEATER_3,
-  MENU_MAX_TEMP_LOCK,
-  MENU_IDLE_OFF,
-  MENU_LIGHT_SOUND,
-  MENU_TEMP_UNIT,
-  MENU_ABOUT,
-  MENU_ITEM_COUNT
+// --- New Enums for Pages ---
+
+enum MenuItemPage1 {
+  MENU_PAGE1_HEATER_1,
+  MENU_PAGE1_HEATER_2,
+  MENU_PAGE1_HEATER_3,
+  MENU_PAGE1_MAX_TEMP_LOCK,
+  MENU_PAGE1_CALIBRATION, // <-- ADDED
+  MENU_PAGE1_NEXT_PAGE,
+  MENU_PAGE1_ITEM_COUNT // <-- This will increment
+};
+
+enum MenuItemPage2 {
+  MENU_PAGE2_IDLE_OFF,
+  MENU_PAGE2_LIGHT_SOUND,
+  MENU_PAGE2_TEMP_UNIT,
+  MENU_PAGE2_ABOUT,
+  MENU_PAGE2_PREV_PAGE,
+  MENU_PAGE2_ITEM_COUNT
 };
 
 enum IdleOffMode {
@@ -55,7 +66,6 @@ struct AppState {
   float target_temp;
   char temp_unit;
   uint8_t tc_faults[3];
-  // ** ADDED ** Array to hold cutoff state for each heater
   bool heater_cutoff_state[3];
 };
 
@@ -81,7 +91,8 @@ private:
   TFT_eSprite _spr;
   UIScreen _current_screen;
   bool _blink_state;
-  int _selected_menu_item;
+  int _selected_menu_item; 
+  int _selected_menu_item_page_2; 
   float _menu_step_accumulator;
   float _temp_edit_value;
   
@@ -91,10 +102,12 @@ private:
   ConfigSaveCallback _save_callback;
 
   void drawStandbyScreen(const AppState& state, const ConfigState& config);
-  void drawSettingsMain(const AppState& state, const ConfigState& config);
+  void drawSettingsPage1(const AppState& state, const ConfigState& config); 
+  void drawSettingsPage2(const AppState& state, const ConfigState& config); 
   void drawSettingsHeaterTargetTemp(const AppState& state);
   void drawSettingsHeaterMaxTemp(const AppState& state);
   void drawSettingsHeaterCalibrate(const AppState& state);
+  void drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config); // <-- ADDED
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
   void drawSettingsLightSound(const AppState& state, const ConfigState& config);
