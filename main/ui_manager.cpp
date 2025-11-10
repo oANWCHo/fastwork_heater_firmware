@@ -13,12 +13,12 @@ const uint32_t INACTIVITY_TIMEOUT_MS = 10000;
 // --- Split menu labels into two pages ---
 const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
   "Heater 1", "Heater 2", "Heater 3", "Max Temp",
-  "Heater Calibration", // <-- ADDED
+  "Heater Calibration", 
   "Next Page >"
 };
 
 const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
-  "Turn off When Idle", "Light and Sound", "Temp Unit", "About",
+  "Turn off When Idle", "Sound", "Temp Unit", "About", // <-- RENAMED
   "< Prev Page"
 };
 // --- End of label split ---
@@ -65,9 +65,9 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_SETTINGS_HEATER_MAX_TEMP: drawSettingsHeaterMaxTemp(state); break;
     case SCREEN_SETTINGS_MAX_TEMP_LOCK:   drawSettingsMaxTempLock(state); break;
     case SCREEN_SETTINGS_HEATER_CALIBRATE:  drawSettingsHeaterCalibrate(state); break;
-    case SCREEN_SETTINGS_CALIBRATION_SELECT: drawSettingsCalibrationSelect(state, config); break; // <-- ADDED
+    case SCREEN_SETTINGS_CALIBRATION_SELECT: drawSettingsCalibrationSelect(state, config); break; 
     case SCREEN_SETTINGS_IDLE_OFF:        drawSettingsIdleOff(state, config); break;
-    case SCREEN_SETTINGS_LIGHT_SOUND:     drawSettingsLightSound(state, config); break;
+    case SCREEN_SETTINGS_SOUND:           drawSettingsSound(state, config); break; // <-- RENAMED
     case SCREEN_SETTINGS_TEMP_UNIT:       drawSettingsTempUnit(state, config); break;
     case SCREEN_SETTINGS_ABOUT:           drawSettingsAbout(state); break;
   }
@@ -141,7 +141,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           _current_screen = SCREEN_SETTINGS_MAX_TEMP_LOCK;
           _temp_edit_value = config.max_temp_lock;
           break;
-        case MENU_PAGE1_CALIBRATION: // <-- ADDED
+        case MENU_PAGE1_CALIBRATION: 
           _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT;
           _selected_menu_item = 0; // Default to H1
           break;
@@ -159,8 +159,8 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           _current_screen = SCREEN_SETTINGS_IDLE_OFF;
           _selected_menu_item = config.idle_off_mode; 
           break;
-        case MENU_PAGE2_LIGHT_SOUND:
-          _current_screen = SCREEN_SETTINGS_LIGHT_SOUND;
+        case MENU_PAGE2_SOUND: // <-- RENAMED
+          _current_screen = SCREEN_SETTINGS_SOUND; // <-- RENAMED
           _selected_menu_item = 0;
           break;
         case MENU_PAGE2_TEMP_UNIT:
@@ -189,29 +189,20 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
     case SCREEN_SETTINGS_HEATER_MAX_TEMP:
       config.max_temps[_selected_menu_item] = _temp_edit_value;
       if (_save_callback) _save_callback(config);
-      // --- CHANGED ---
-      // No longer go to calibrate screen
-      _current_screen = SCREEN_SETTINGS_PAGE_1; // Go back to main settings
-      // --- END CHANGE ---
+      _current_screen = SCREEN_SETTINGS_PAGE_1; 
       _menu_step_accumulator = 0.0f;
       return true;
 
-    // --- ADDED: New screen logic ---
     case SCREEN_SETTINGS_CALIBRATION_SELECT:
-      // _selected_menu_item is 0, 1, or 2 from the select screen
       _current_screen = SCREEN_SETTINGS_HEATER_CALIBRATE;
       _temp_edit_value = config.tc_offsets[_selected_menu_item];
       _menu_step_accumulator = 0.0f;
       return true;
-    // --- END ADD ---
 
     case SCREEN_SETTINGS_HEATER_CALIBRATE:
       config.tc_offsets[_selected_menu_item] = _temp_edit_value; 
       if (_save_callback) _save_callback(config);
-      // --- CHANGED ---
-      // Go back to the new calibration select screen, not Page 1
       _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT; 
-      // --- END CHANGE ---
       _menu_step_accumulator = 0.0f;
       return true;
 
@@ -229,8 +220,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       _menu_step_accumulator = 0.0f;
       return true;
       
-    case SCREEN_SETTINGS_LIGHT_SOUND:
-      _selected_menu_item = (_selected_menu_item == 0) ? 1 : 0;
+    case SCREEN_SETTINGS_SOUND: // <-- RENAMED
+      // This screen no longer uses _selected_menu_item to toggle
+      // It's handled by rotation, but a click here has no effect
+      // We return true to acknowledge the click, but do nothing
       return true;
       
     case SCREEN_SETTINGS_TEMP_UNIT:
@@ -266,23 +259,18 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
       _temp_edit_value = config.target_temps[_selected_menu_item];
       break;
 
-    // --- ADDED ---
     case SCREEN_SETTINGS_CALIBRATION_SELECT:
       _current_screen = SCREEN_SETTINGS_PAGE_1;
       break;
-    // --- END ADD ---
       
-    // --- CHANGED ---
     case SCREEN_SETTINGS_HEATER_CALIBRATE:
-      // Go back to selection screen, not max temp screen
       _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT; 
       break;
-    // --- END CHANGE ---
 
     // Page 2 sub-screens return to Page 2
     case SCREEN_SETTINGS_IDLE_OFF:
     case SCREEN_SETTINGS_TEMP_UNIT:
-    case SCREEN_SETTINGS_LIGHT_SOUND:
+    case SCREEN_SETTINGS_SOUND: // <-- RENAMED
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_2;
       break;
@@ -319,13 +307,11 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       break;
     }
     
-    // --- ADDED: Encoder logic for new screen ---
     case SCREEN_SETTINGS_CALIBRATION_SELECT: {
       const int num_items = 3; // H1, H2, H3
       _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
       break;
     }
-    // --- END ADD ---
 
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP: {
       _temp_edit_value += (float)change * 0.5f;
@@ -364,10 +350,10 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
       break;
     }
-    case SCREEN_SETTINGS_LIGHT_SOUND: {
+    case SCREEN_SETTINGS_SOUND: { // <-- RENAMED
       if (change != 0) { 
-        if (_selected_menu_item == 0) config.light_on = !config.light_on;
-        else config.sound_on = !config.sound_on;
+        // Only one option, so just toggle sound
+        config.sound_on = !config.sound_on;
         if (_save_callback) _save_callback(config);
       }
       break;
@@ -437,38 +423,58 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
       int bar_width = (int)((_spr.width() - 4) * progress);
       _spr.fillRect(2, y + LINE_SPACING - 4, bar_width, 3, TFT_CYAN);
     }
+    
+    // --- MODIFIED: Split label, temp, and settings for alignment ---
+
+    // 1. Draw Label (Left Aligned)
     _spr.setTextColor(TFT_WHITE, bg_color);
-    _spr.setTextDatum(ML_DATUM);
-    _spr.setTextSize(FONT_SIZE);
-    char buffer[80];
+    _spr.setTextDatum(ML_DATUM); // Middle Left
+    _spr.setTextSize(FONT_SIZE); // Size 2
+    _spr.drawString(labels[i], 5, y + (LINE_SPACING / 2));
+
+    // 2. Draw Temp Value (Right Aligned)
+    char temp_buffer[20];
     float display_temp = convertTemp(temps_c[i], state.temp_unit);
+    if (isnan(display_temp)) {
+      snprintf(temp_buffer, sizeof(temp_buffer), "---");
+    } else {
+      snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
+    }
+    _spr.setTextDatum(MR_DATUM); // Middle Right
+    _spr.setTextSize(FONT_SIZE); // Size 2
+    
+    // --- THIS IS THE FIX ---
+    int temp_x_pos = 210; // X position for the right edge of the temp (Was 175)
+    // --- END FIX ---
+
+    _spr.drawString(temp_buffer, temp_x_pos, y + (LINE_SPACING / 2));
+
+    // 3. Draw (target, max) smaller (Req 3)
     if (i < 3) {
       char settings_buf[20];
       int settings_index = i;
       snprintf(settings_buf, sizeof(settings_buf), "(%.0f, %.0f)",
                convertTemp(settings[settings_index][0], state.temp_unit),
                convertTemp(settings[settings_index][1], state.temp_unit));
-      if (isnan(display_temp)) {
-        snprintf(buffer, sizeof(buffer), "%s --- %s", labels[i], settings_buf);
-      } else {
-        snprintf(buffer, sizeof(buffer), "%s %.2f %c %s",
-                 labels[i], display_temp, state.temp_unit, settings_buf);
-      }
-    } else {
-      if (isnan(display_temp)) {
-        snprintf(buffer, sizeof(buffer), "%s ---", labels[i]);
-      } else {
-        snprintf(buffer, sizeof(buffer), "%s %.2f %c", labels[i], display_temp, state.temp_unit);
-      }
+      _spr.setTextDatum(ML_DATUM); // Middle Left
+      _spr.setTextSize(1); // <-- Size 1
+      _spr.drawString(settings_buf, temp_x_pos + 5, y + (LINE_SPACING / 2)); // Draw to the right of the temp
     }
-    _spr.drawString(buffer, 5, y + (LINE_SPACING / 2));
+    // --- END MODIFICATION ---
   }
   
+  // --- NEW 3-ROW BUTTON LAYOUT ---
+  
+  // --- THIS IS THE FIX ---
+  // These definitions were missing from your file
   int button_h = 30;
   int x_padding = 10;
   int button_spacing = 10;
   int screen_w = _spr.width();
   int usable_w = screen_w - (2 * x_padding);
+  // --- END FIX ---
+
+  // Row 1: 3 Buttons (Heater1, Heater2, Heater3)
   int button_y1 = 130;
   int button_w1 = (usable_w - (2 * button_spacing)) / 3; 
   int total_w1 = (button_w1 * 3) + (button_spacing * 2);
@@ -498,6 +504,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
   }
 
+  // Row 2: 2 Buttons (start, stop)
   int button_y2 = button_y1 + button_h + button_spacing;
   int button_w2 = (usable_w - (1 * button_spacing)) / 2; 
   int total_w2 = (button_w2 * 2) + (button_spacing * 1);
@@ -522,6 +529,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
   }
 
+  // Row 3: 1 Button (Settings)
   int button_y3 = button_y2 + button_h + button_spacing;
   int button_w3 = usable_w; 
   int x_start3 = x_padding;
@@ -670,10 +678,7 @@ void UIManager::drawSettingsHeaterMaxTemp(const AppState& state) {
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
   _spr.setTextDatum(BC_DATUM);
   _spr.setTextSize(1);
-  // --- CHANGED ---
-  // Updated help text, as it no longer goes to calibration
   _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
-  // --- END CHANGE ---
 }
 
 void UIManager::drawSettingsHeaterCalibrate(const AppState& state) {
@@ -682,7 +687,6 @@ void UIManager::drawSettingsHeaterCalibrate(const AppState& state) {
   _spr.setTextDatum(TC_DATUM);
   _spr.setTextSize(2);
   char title_buffer[20];
-  // _selected_menu_item is 0, 1, or 2, set by the new select screen
   snprintf(title_buffer, sizeof(title_buffer), "Heater (%d)", _selected_menu_item + 1);
   _spr.drawString(title_buffer, _spr.width() / 2, 20);
   
@@ -702,7 +706,6 @@ void UIManager::drawSettingsHeaterCalibrate(const AppState& state) {
   _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
 }
 
-// --- ADDED: New drawing function ---
 void UIManager::drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config) {
   _spr.fillSprite(TFT_BLACK);
   _spr.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -718,7 +721,7 @@ void UIManager::drawSettingsCalibrationSelect(const AppState& state, const Confi
   for (int i = 0; i < 3; ++i) {
     _spr.setTextDatum(MC_DATUM);
     _spr.setTextSize(2);
-    if (i == _selected_menu_item) { // _selected_menu_item is used for selection (0, 1, or 2)
+    if (i == _selected_menu_item) { 
         _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
     } else {
         _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -731,7 +734,6 @@ void UIManager::drawSettingsCalibrationSelect(const AppState& state, const Confi
   _spr.setTextSize(1);
   _spr.drawString("Rot: Select | Press: Edit | Dbl-Press: Back", _spr.width() / 2, _spr.height() - 10);
 }
-// --- END ADD ---
 
 void UIManager::drawSettingsMaxTempLock(const AppState& state) {
   _spr.fillSprite(TFT_BLACK);
@@ -770,26 +772,25 @@ void UIManager::drawSettingsIdleOff(const AppState& state, const ConfigState& co
   }
 }
 
-void UIManager::drawSettingsLightSound(const AppState& state, const ConfigState& config) {
+void UIManager::drawSettingsSound(const AppState& state, const ConfigState& config) { // <-- RENAMED
     _spr.fillSprite(TFT_BLACK);
     _spr.setTextColor(TFT_WHITE, TFT_BLACK);
     _spr.setTextDatum(TC_DATUM);
     _spr.setTextSize(2);
-    _spr.drawString("Light and Sound", _spr.width() / 2, 20);
+    _spr.drawString("Sound", _spr.width() / 2, 20); // <-- RENAMED
 
     _spr.setTextDatum(MC_DATUM);
     _spr.setTextSize(2);
-    if (_selected_menu_item == 0) _spr.drawRect(40, 80, _spr.width() - 80, 40, TFT_YELLOW);
+    
+    // --- MODIFIED: Removed Light, centered Sound ---
+    _spr.drawRect(40, 100, _spr.width() - 80, 40, TFT_YELLOW); // Centered
     _spr.setTextColor(TFT_WHITE);
-    _spr.drawString(config.light_on ? "Light: ON" : "Light: OFF", _spr.width() / 2, 100);
-
-    if (_selected_menu_item == 1) _spr.drawRect(40, 140, _spr.width() - 80, 40, TFT_YELLOW);
-    _spr.drawString(config.sound_on ? "Sound: ON" : "Sound: OFF", _spr.width() / 2, 160);
+    _spr.drawString(config.sound_on ? "Sound: ON" : "Sound: OFF", _spr.width() / 2, 120); // Centered
     
     _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
     _spr.setTextDatum(BC_DATUM);
     _spr.setTextSize(1);
-    _spr.drawString("Press: Select | Rot: Toggle | Dbl-Press: Back", _spr.width() / 2, _spr.height() - 10);
+    _spr.drawString("Rot: Toggle | Dbl-Press: Back", _spr.width() / 2, _spr.height() - 10); // <-- Updated help text
 }
 
 void UIManager::drawSettingsTempUnit(const AppState& state, const ConfigState& config) {

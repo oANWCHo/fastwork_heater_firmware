@@ -89,12 +89,21 @@ bool pwm_override_enabled = false;
 float pwm_override_percent = 0.0f;
 float last_pwm_percent[NUM_THERMOCOUPLES] = { 0.0f, 0.0f, 0.0f };
 
-uint32_t t_beep_stop = 0;
+volatile int beep_queue = 0;
+volatile uint32_t t_next_beep_action = 0;
+volatile bool beeper_active = false;
+const int BEEP_ON_MS = 60;
+const int BEEP_OFF_MS = 100;
 
 // ** ADDED ** State for max temp cutoff blinking
 bool heater_cutoff_state[NUM_THERMOCOUPLES] = { false, false, false };
 uint32_t heater_cutoff_start_time[NUM_THERMOCOUPLES] = { 0, 0, 0 };
 const uint32_t CUTOFF_BLINK_DURATION_MS = 10000;  // 10 seconds
+
+// --- MODIFIED FOR MAX TEMP BEEP ---
+bool heater_near_max_state[NUM_THERMOCOUPLES] = { false, false, false }; // Renamed from heater_near_target_state
+const float NEAR_MAX_THRESHOLD_C = 5.0f; // Beep when within 5 degrees C of max temp
+// --- END MODIFICATION ---
 
 // ========== [5) TPO via Hardware Timer] ==========
 portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
@@ -154,7 +163,12 @@ void IRAM_ATTR tpo_isr() {
   digitalWrite(SSR_PIN2, (pos < onTicks[1]) ? HIGH : LOW);
   digitalWrite(SSR_PIN3, (pos < onTicks[2]) ? HIGH : LOW);
 }
-
+void queue_beeps(int count) {
+  if (beeper_active || !config.sound_on) return; // Don't interrupt, or if sound is off
+  beep_queue = count * 2; // (on, off, on, off, on, off)
+  t_next_beep_action = millis();
+  beeper_active = true;
+}
 void saveConfig(const ConfigState& config) {
   // Save the entire config struct as a blob of bytes
   preferences.putBytes("config", &config, sizeof(config));
@@ -277,9 +291,21 @@ void setup() {
 
 // ========== [8) Main Loop: cooperative, no delay()] ==========
 void loop() {
-  if (t_beep_stop > 0 && millis() >= t_beep_stop) {
-    digitalWrite(BUZZER, LOW);
-    t_beep_stop = 0;
+  if (beeper_active && millis() >= t_next_beep_action) {
+    if (beep_queue > 0) {
+      bool is_on_cycle = (beep_queue % 2 == 0);
+      if (is_on_cycle) {
+        digitalWrite(BUZZER, HIGH);
+        t_next_beep_action = millis() + BEEP_ON_MS;
+      } else {
+        digitalWrite(BUZZER, LOW);
+        t_next_beep_action = millis() + BEEP_OFF_MS;
+      }
+      beep_queue--;
+    } else {
+      digitalWrite(BUZZER, LOW);
+      beeper_active = false;
+    }
   }
 
   // ** ADDED ** Manage the cutoff blink state timer
@@ -446,10 +472,7 @@ void check_encoder_switch() {
   int cur = digitalRead(ENCODER_SW);
   switch_state_display = cur;
   if (lastSwitchState == HIGH && cur == LOW) {  // On button press
-    if (config.sound_on) {
-      digitalWrite(BUZZER, HIGH);
-      t_beep_stop = millis() + 50;
-    }
+    queue_beeps(1);
     if (click_state == IDLE) {
       click_state = AWAITING_SECOND_CLICK;
       first_click_time = millis();
@@ -499,7 +522,25 @@ void updateControl() {
       continue;               // Move to the next heater
     }
 
-    // 3. Safety Max Temp Cutoff
+    // --- LOGIC MOVED AND MODIFIED ---
+    // 3a. NEW: Check for near max temp warning
+    float max_temp_diff = config.max_temps[i] - tc_temp_display[i];
+    if (max_temp_diff < NEAR_MAX_THRESHOLD_C)
+    {
+      if (!heater_near_max_state[i])
+      {
+        heater_near_max_state[i] = true;
+        // Beep 3 times as a warning
+        queue_beeps(3);
+      }
+    }
+    else if (max_temp_diff > (NEAR_MAX_THRESHOLD_C + 2.0f)) // Hysteresis (2 degrees)
+    {
+      // We've moved away from the max temp, reset the state
+      heater_near_max_state[i] = false;
+    }
+
+    // 3b. Safety Max Temp Cutoff (Original section 3)
     if (tc_temp_display[i] >= config.max_temps[i]) {
       tpo_set_percent(i, 0);
       pid_integral[i] = 0.0f;
@@ -509,6 +550,7 @@ void updateControl() {
       config.heater_active[i] = false;
       heater_cutoff_state[i] = true;
       heater_cutoff_start_time[i] = millis();
+      heater_near_max_state[i] = false; // Reset state on cutoff
 
       // Check if any heaters are left active. If not, turn off master switch.
       bool any_active = false;
@@ -522,6 +564,7 @@ void updateControl() {
 
       continue;  // Move to the next heater
     }
+    // --- END OF MOVED LOGIC ---
 
     // 4. PID Calculation
     float error = config.target_temps[i] - tc_temp_display[i];
@@ -546,6 +589,12 @@ void updateControl() {
     const float U_SCALE = 100.0f;
     float percent = u * (100.0f / U_SCALE);
     if (percent > 100.0f) percent = 100.0f;
+    
+    // --- OLD BEEP LOGIC REMOVED ---
+    // float temp_error = fabsf(config.target_temps[i] - tc_temp_display[i]);
+    // if (temp_error < NEAR_TARGET_THRESHOLD_C) ...
+    // else if (temp_error > (NEAR_TARGET_THRESHOLD_C + 1.0f)) ...
+    // --- END REMOVED LOGIC ---
 
     // 5. Set TPO percentage for this specific heater
     tpo_set_percent(i, percent);

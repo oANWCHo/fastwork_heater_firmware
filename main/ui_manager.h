@@ -13,7 +13,7 @@ enum UIScreen {
   SCREEN_SETTINGS_CALIBRATION_SELECT, // <-- ADDED: Screen to select which heater to calibrate
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
-  SCREEN_SETTINGS_LIGHT_SOUND,
+  SCREEN_SETTINGS_SOUND, // <-- RENAMED
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_ABOUT
 };
@@ -32,7 +32,7 @@ enum MenuItemPage1 {
 
 enum MenuItemPage2 {
   MENU_PAGE2_IDLE_OFF,
-  MENU_PAGE2_LIGHT_SOUND,
+  MENU_PAGE2_SOUND, // <-- RENAMED
   MENU_PAGE2_TEMP_UNIT,
   MENU_PAGE2_ABOUT,
   MENU_PAGE2_PREV_PAGE,
@@ -110,7 +110,7 @@ private:
   void drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config); // <-- ADDED
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
-  void drawSettingsLightSound(const AppState& state, const ConfigState& config);
+  void drawSettingsSound(const AppState& state, const ConfigState& config); // <-- RENAMED
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
 
