@@ -391,8 +391,8 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   };
 
   float temps_c[] = {
-    state.tc_temps[0], NAN, state.tc_temps[2],
-    state.tc_temps[1], state.ir_temps[0], state.ir_temps[1]
+    state.tc_temps[0], state.tc_temps[1], NAN,
+    state.tc_temps[2], state.ir_temps[0], state.ir_temps[1]
   };
   
   float settings[3][2] = {

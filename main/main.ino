@@ -20,8 +20,8 @@
 #define MAXDO 19   // MISO (Shared)
 #define MAXCLK 18  // SCK (Shared)
 #define MAXCS1 32  // CS for sensor 1
-#define MAXCS2 5   // CS for sensor 2
-#define MAXCS3 33  // CS for sensor 3
+#define MAXCS2 33   // CS for sensor 2
+#define MAXCS3 5  // CS for sensor 3
 
 #define ENCODER_A 36
 #define ENCODER_B 39
