@@ -382,6 +382,13 @@ uint16_t UIManager::getStatusColor(bool is_active, float current_temp, float tar
 }
 
 void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& config) {
+  static float last_valid_standby_temps[6];
+  static bool initialized = false;
+  if (!initialized) {
+    for (int i = 0; i < 6; i++) last_valid_standby_temps[i] = NAN;
+    initialized = true;
+  }
+  
   _spr.fillSprite(TFT_BLACK);
   const int FONT_SIZE = 2;
   const int LINE_SPACING = 20;
@@ -433,9 +440,16 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     _spr.drawString(labels[i], 5, y + (LINE_SPACING / 2));
 
     // 2. Draw Temp Value (Right Aligned)
+    if (!isnan(temps_c[i])) {
+      last_valid_standby_temps[i] = temps_c[i];
+    }
+    
+    // Now, use the cached value (which is either current or last-good) for display
+    float display_temp = convertTemp(last_valid_standby_temps[i], state.temp_unit);
+
     char temp_buffer[20];
-    float display_temp = convertTemp(temps_c[i], state.temp_unit);
-    if (isnan(display_temp)) {
+    if (isnan(display_temp)) { 
+      // This will now only show "---" if a valid temp has *never* been received
       snprintf(temp_buffer, sizeof(temp_buffer), "---");
     } else {
       snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
