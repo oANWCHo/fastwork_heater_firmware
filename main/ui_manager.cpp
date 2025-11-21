@@ -385,14 +385,20 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   _spr.fillSprite(TFT_BLACK);
   const int FONT_SIZE = 2;
   const int LINE_SPACING = 20;
+
+  // 1. UPDATED: Removed "TC Temp", kept IR sensors
   const char* labels[] = {
     "H1 Temp", "H2 Temp", "H3 Temp",
-    "TC Temp", "IR1 Temp", "IR2 Temp"
+    "IR1 Temp", "IR2 Temp"
   };
 
+  // 2. UPDATED: Mapped tc_temps[2] to Heater 3, removed the standalone TC entry
   float temps_c[] = {
-    state.tc_temps[0], state.tc_temps[1], NAN,
-    state.tc_temps[2], state.ir_temps[0], state.ir_temps[1]
+    state.tc_temps[0], 
+    state.tc_temps[1], 
+    state.tc_temps[2], // <-- MOVED: Now displayed as H3 Temp (used for control)
+    state.ir_temps[0], 
+    state.ir_temps[1]
   };
   
   float settings[3][2] = {
@@ -401,9 +407,12 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     {config.target_temps[2], config.max_temps[2]},
   };
 
-  for (int i = 0; i < 6; ++i) {
+  // 3. UPDATED: Loop count changed from 6 to 5
+  for (int i = 0; i < 5; ++i) {
     int y = 4 + i * LINE_SPACING;
     uint16_t bg_color = COLOR_IDLE;
+    
+    // Logic for Heaters 1, 2, and 3
     if (i < 3) {
       if (config.heater_active[i]) {
         if (state.is_heating_active) {
@@ -414,22 +423,27 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
         }
       }
     }
+    
+    // Blink warning if temp > 270
     if (temps_c[i] > 270.0f && _blink_state) {
       bg_color = COLOR_WARN;
     }
+
     _spr.fillRect(0, y, _spr.width(), LINE_SPACING, bg_color);
+    
+    // Draw activity bar for active heaters
     if (i < 3 && config.heater_active[i] && state.is_heating_active) {
       float progress = (millis() % 1500) / 1500.0f;
       int bar_width = (int)((_spr.width() - 4) * progress);
       _spr.fillRect(2, y + LINE_SPACING - 4, bar_width, 3, TFT_CYAN);
     }
     
-    // --- MODIFIED: Split label, temp, and settings for alignment ---
+    // --- Drawing Text ---
 
     // 1. Draw Label (Left Aligned)
     _spr.setTextColor(TFT_WHITE, bg_color);
-    _spr.setTextDatum(ML_DATUM); // Middle Left
-    _spr.setTextSize(FONT_SIZE); // Size 2
+    _spr.setTextDatum(ML_DATUM); 
+    _spr.setTextSize(FONT_SIZE); 
     _spr.drawString(labels[i], 5, y + (LINE_SPACING / 2));
 
     // 2. Draw Temp Value (Right Aligned)
@@ -440,39 +454,31 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     } else {
       snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
     }
-    _spr.setTextDatum(MR_DATUM); // Middle Right
-    _spr.setTextSize(FONT_SIZE); // Size 2
+    _spr.setTextDatum(MR_DATUM); 
+    _spr.setTextSize(FONT_SIZE); 
     
-    // --- THIS IS THE FIX ---
-    int temp_x_pos = 210; // X position for the right edge of the temp (Was 175)
-    // --- END FIX ---
-
+    int temp_x_pos = 210; 
     _spr.drawString(temp_buffer, temp_x_pos, y + (LINE_SPACING / 2));
 
-    // 3. Draw (target, max) smaller (Req 3)
+    // 3. Draw (target, max) settings for Heaters 1, 2, 3
     if (i < 3) {
       char settings_buf[20];
       int settings_index = i;
       snprintf(settings_buf, sizeof(settings_buf), "(%.0f, %.0f)",
                convertTemp(settings[settings_index][0], state.temp_unit),
                convertTemp(settings[settings_index][1], state.temp_unit));
-      _spr.setTextDatum(ML_DATUM); // Middle Left
-      _spr.setTextSize(1); // <-- Size 1
-      _spr.drawString(settings_buf, temp_x_pos + 5, y + (LINE_SPACING / 2)); // Draw to the right of the temp
+      _spr.setTextDatum(ML_DATUM); 
+      _spr.setTextSize(1); 
+      _spr.drawString(settings_buf, temp_x_pos + 5, y + (LINE_SPACING / 2)); 
     }
-    // --- END MODIFICATION ---
   }
   
-  // --- NEW 3-ROW BUTTON LAYOUT ---
-  
-  // --- THIS IS THE FIX ---
-  // These definitions were missing from your file
+  // --- BUTTON LAYOUT (Unchanged) ---
   int button_h = 30;
   int x_padding = 10;
   int button_spacing = 10;
   int screen_w = _spr.width();
   int usable_w = screen_w - (2 * x_padding);
-  // --- END FIX ---
 
   // Row 1: 3 Buttons (Heater1, Heater2, Heater3)
   int button_y1 = 130;
