@@ -1,8 +1,9 @@
 /****************************************************
  * ESP32 + MAX31855 x3 + MLX910614 x2 + Encoder + ILI9341
- * Heater control via SSR using Time-Proportioning (Burst Fire)
+ * Heater control via SSR using Time-Proportioning 
  *
  * Final version with complete UI Manager.
+ * please download require libraries and enable PSRAM before upload project
  ****************************************************/
 
 // ========== [1) Include Libraries] ==========
@@ -82,7 +83,7 @@ float go_to = NAN;
 bool has_go_to = false;
 const int ENCODER_COUNTS_PER_STEP = 2;
 
-float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;
+float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;// pid settings
 float pid_integral[NUM_THERMOCOUPLES] = { 0.0f, 0.0f, 0.0f };
 float pid_prev_err[NUM_THERMOCOUPLES] = { 0.0f, 0.0f, 0.0f };
 bool pwm_override_enabled = false;
@@ -257,14 +258,17 @@ void setup() {
   pcnt_counter_resume(PCNT_UNIT_0);
 
   Wire.begin();
-  if (!mlx1.begin(IR1_ADDR, &Wire)) {
-    Serial.println("Error connecting to MLX #1 (Addr 0x10)");
-    while (1) {}
-  }
-  if (!mlx2.begin(IR2_ADDR, &Wire)) {
-    Serial.println("Error connecting to MLX #2 (Addr 0x11)");
-    while (1) {}
-  }
+  mlx1.begin(IR1_ADDR, &Wire);
+  mlx2.begin(IR2_ADDR, &Wire);
+
+  // if (!mlx1.begin(IR1_ADDR, &Wire)) {
+  //   Serial.println("Error connecting to MLX #1 (Addr 0x10)");
+  //   while (1) {}
+  // }
+  // if (!mlx2.begin(IR2_ADDR, &Wire)) {
+  //   Serial.println("Error connecting to MLX #2 (Addr 0x11)");
+  //   while (1) {}
+  // }
 
   max31855_init_pins();
   Serial.println("Using manual MAX31855 driver.");

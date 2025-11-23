@@ -9,25 +9,23 @@ enum UIScreen {
   SCREEN_SETTINGS_PAGE_2, 
   SCREEN_SETTINGS_HEATER_TARGET_TEMP,
   SCREEN_SETTINGS_HEATER_MAX_TEMP,
-  SCREEN_SETTINGS_HEATER_CALIBRATE, // This screen is now re-used
-  SCREEN_SETTINGS_CALIBRATION_SELECT, // <-- ADDED: Screen to select which heater to calibrate
+  SCREEN_SETTINGS_HEATER_CALIBRATE, 
+  SCREEN_SETTINGS_CALIBRATION_SELECT, 
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
-  SCREEN_SETTINGS_SOUND, // <-- RENAMED
+  SCREEN_SETTINGS_SOUND,
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_ABOUT
 };
-
-// --- New Enums for Pages ---
 
 enum MenuItemPage1 {
   MENU_PAGE1_HEATER_1,
   MENU_PAGE1_HEATER_2,
   MENU_PAGE1_HEATER_3,
   MENU_PAGE1_MAX_TEMP_LOCK,
-  MENU_PAGE1_CALIBRATION, // <-- ADDED
+  MENU_PAGE1_CALIBRATION, 
   MENU_PAGE1_NEXT_PAGE,
-  MENU_PAGE1_ITEM_COUNT // <-- This will increment
+  MENU_PAGE1_ITEM_COUNT 
 };
 
 enum MenuItemPage2 {
@@ -114,7 +112,6 @@ private:
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
 
-  // Helper functions
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
 };

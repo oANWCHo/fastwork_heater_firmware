@@ -10,7 +10,6 @@
 
 const uint32_t INACTIVITY_TIMEOUT_MS = 10000;
 
-// --- Split menu labels into two pages ---
 const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
   "Heater 1", "Heater 2", "Heater 3", "Max Temp",
   "Heater Calibration", 
@@ -21,7 +20,6 @@ const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
   "Turn off When Idle", "Sound", "Temp Unit", "About", // <-- RENAMED
   "< Prev Page"
 };
-// --- End of label split ---
 
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = {
   "15 min.", "30 min.", "60 min.", "Always ON"
@@ -267,10 +265,9 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
       _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT; 
       break;
 
-    // Page 2 sub-screens return to Page 2
     case SCREEN_SETTINGS_IDLE_OFF:
     case SCREEN_SETTINGS_TEMP_UNIT:
-    case SCREEN_SETTINGS_SOUND: // <-- RENAMED
+    case SCREEN_SETTINGS_SOUND: 
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_2;
       break;
@@ -308,7 +305,7 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
     }
     
     case SCREEN_SETTINGS_CALIBRATION_SELECT: {
-      const int num_items = 3; // H1, H2, H3
+      const int num_items = 3; 
       _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
       break;
     }
@@ -367,7 +364,6 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
   return true;
 }
 
-// All drawing functions and helpers below
 float UIManager::convertTemp(float temp_c, char unit) {
   if (unit == 'F' && !isnan(temp_c)) {
     return temp_c * 1.8f + 32.0f;
@@ -393,17 +389,15 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   const int FONT_SIZE = 2;
   const int LINE_SPACING = 20;
 
-  // 1. UPDATED: Removed "TC Temp", kept IR sensors
   const char* labels[] = {
     "H1 Temp", "H2 Temp", "H3 Temp",
     "IR1 Temp", "IR2 Temp"
   };
 
-  // 2. UPDATED: Mapped tc_temps[2] to Heater 3, removed the standalone TC entry
   float temps_c[] = {
     state.tc_temps[0], 
     state.tc_temps[1], 
-    state.tc_temps[2], // <-- MOVED: Now displayed as H3 Temp (used for control)
+    state.tc_temps[2], 
     state.ir_temps[0], 
     state.ir_temps[1]
   };
@@ -414,12 +408,10 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     {config.target_temps[2], config.max_temps[2]},
   };
 
-  // 3. UPDATED: Loop count changed from 6 to 5
   for (int i = 0; i < 5; ++i) {
     int y = 4 + i * LINE_SPACING;
     uint16_t bg_color = COLOR_IDLE;
     
-    // Logic for Heaters 1, 2, and 3
     if (i < 3) {
       if (config.heater_active[i]) {
         if (state.is_heating_active) {
@@ -431,39 +423,31 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
       }
     }
     
-    // Blink warning if temp > 270
     if (temps_c[i] > 270.0f && _blink_state) {
       bg_color = COLOR_WARN;
     }
 
     _spr.fillRect(0, y, _spr.width(), LINE_SPACING, bg_color);
     
-    // Draw activity bar for active heaters
     if (i < 3 && config.heater_active[i] && state.is_heating_active) {
       float progress = (millis() % 1500) / 1500.0f;
       int bar_width = (int)((_spr.width() - 4) * progress);
       _spr.fillRect(2, y + LINE_SPACING - 4, bar_width, 3, TFT_CYAN);
     }
     
-    // --- Drawing Text ---
-
-    // 1. Draw Label (Left Aligned)
     _spr.setTextColor(TFT_WHITE, bg_color);
     _spr.setTextDatum(ML_DATUM); 
     _spr.setTextSize(FONT_SIZE); 
     _spr.drawString(labels[i], 5, y + (LINE_SPACING / 2));
 
-    // 2. Draw Temp Value (Right Aligned)
     if (!isnan(temps_c[i])) {
       last_valid_standby_temps[i] = temps_c[i];
     }
     
-    // Now, use the cached value (which is either current or last-good) for display
     float display_temp = convertTemp(last_valid_standby_temps[i], state.temp_unit);
 
     char temp_buffer[20];
     if (isnan(display_temp)) { 
-      // This will now only show "---" if a valid temp has *never* been received
       snprintf(temp_buffer, sizeof(temp_buffer), "---");
     } else {
       snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
@@ -474,7 +458,6 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     int temp_x_pos = 210; 
     _spr.drawString(temp_buffer, temp_x_pos, y + (LINE_SPACING / 2));
 
-    // 3. Draw (target, max) settings for Heaters 1, 2, 3
     if (i < 3) {
       char settings_buf[20];
       int settings_index = i;
@@ -487,14 +470,12 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
   }
   
-  // --- BUTTON LAYOUT (Unchanged) ---
   int button_h = 30;
   int x_padding = 10;
   int button_spacing = 10;
   int screen_w = _spr.width();
   int usable_w = screen_w - (2 * x_padding);
 
-  // Row 1: 3 Buttons (Heater1, Heater2, Heater3)
   int button_y1 = 130;
   int button_w1 = (usable_w - (2 * button_spacing)) / 3; 
   int total_w1 = (button_w1 * 3) + (button_spacing * 2);
@@ -524,7 +505,6 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
   }
 
-  // Row 2: 2 Buttons (start, stop)
   int button_y2 = button_y1 + button_h + button_spacing;
   int button_w2 = (usable_w - (1 * button_spacing)) / 2; 
   int total_w2 = (button_w2 * 2) + (button_spacing * 1);
@@ -549,7 +529,6 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
   }
 
-  // Row 3: 1 Button (Settings)
   int button_y3 = button_y2 + button_h + button_spacing;
   int button_w3 = usable_w; 
   int x_start3 = x_padding;
@@ -687,6 +666,7 @@ void UIManager::drawSettingsHeaterMaxTemp(const AppState& state) {
   _spr.setTextDatum(TC_DATUM);
   _spr.setTextSize(2);
   char title_buffer[20];
+
   snprintf(title_buffer, sizeof(title_buffer), "Heater (%d)", _selected_menu_item + 1);
   _spr.drawString(title_buffer, _spr.width() / 2, 20);
   _spr.setTextDatum(MC_DATUM);
@@ -802,7 +782,6 @@ void UIManager::drawSettingsSound(const AppState& state, const ConfigState& conf
     _spr.setTextDatum(MC_DATUM);
     _spr.setTextSize(2);
     
-    // --- MODIFIED: Removed Light, centered Sound ---
     _spr.drawRect(40, 100, _spr.width() - 80, 40, TFT_YELLOW); // Centered
     _spr.setTextColor(TFT_WHITE);
     _spr.drawString(config.sound_on ? "Sound: ON" : "Sound: OFF", _spr.width() / 2, 120); // Centered
