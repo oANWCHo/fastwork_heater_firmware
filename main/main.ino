@@ -18,25 +18,27 @@
 #include <Preferences.h>
 
 // ========== [2) Pin Definitions] ==========
-#define MAXDO 19   // MISO (Shared)
-#define MAXCLK 18  // SCK (Shared)
-#define MAXCS1 32  // CS for sensor 1
-#define MAXCS2 33   // CS for sensor 2
-#define MAXCS3 5  // CS for sensor 3
+#define MAXDO 13   // MISO (Shared)
+#define MAXCLK 12  // SCK (Shared)
+#define MAXCS1 15  // CS for sensor 1
+#define MAXCS2 16   // CS for sensor 2
+#define MAXCS3 17  // CS for sensor 3
 
-#define ENCODER_A 36
-#define ENCODER_B 39
-#define ENCODER_SW 34
+#define ENCODER_A 6
+#define ENCODER_B 7
+#define ENCODER_SW 8
 
-#define BUZZER 23
+#define SDA_PIN 4
+#define SCL_PIN 5
+#define BUZZER 41
 
 #define IR1_ADDR 0x10
 #define IR2_ADDR 0x11
 
 // --- SSR Output (Burst-Fire) ---
-#define SSR_PIN1 25
-#define SSR_PIN2 26
-#define SSR_PIN3 27
+#define SSR_PIN1 42
+#define SSR_PIN2 2
+#define SSR_PIN3 1
 
 #define TPO_TICK_US 1000
 #define WINDOW_MS_INIT 1000
@@ -257,7 +259,8 @@ void setup() {
   pcnt_counter_clear(PCNT_UNIT_0);
   pcnt_counter_resume(PCNT_UNIT_0);
 
-  Wire.begin();
+  // Wire.begin();
+  Wire.begin(SDA_PIN, SCL_PIN);
   mlx1.begin(IR1_ADDR, &Wire);
   mlx2.begin(IR2_ADDR, &Wire);
 
