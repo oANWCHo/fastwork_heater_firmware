@@ -53,7 +53,6 @@ Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
 Ticker tpo_ticker;
 
-SPIClass * sensorSPI = new SPIClass(HSPI);
 // ========== [4) Runtime Variables] ==========
 long lastEncoderValue = 0;
 int lastSwitchState = HIGH;
@@ -367,65 +366,25 @@ void updateControl() {
   }
 }
 
-// void max31855_init_pins() {
-//   pinMode(MAXCLK, OUTPUT);
-//   pinMode(MAXDO, INPUT_PULLUP);
-//   for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
-//     pinMode(TC_CS_PINS[i], OUTPUT); digitalWrite(TC_CS_PINS[i], HIGH);
-//   }
-// }
-
 void max31855_init_pins() {
-  // [NEW] Initialize Hardware SPI on your specific pins
-  // begin(SCK, MISO, MOSI, SS)
-  // We set MOSI and SS to -1 because MAX31855 doesn't use MOSI, 
-  // and we handle CS (SS) manually.
-  sensorSPI->begin(MAXCLK, MAXDO, -1, -1); 
-
-  // Initialize CS pins for the 3 sensors
+  pinMode(MAXCLK, OUTPUT);
+  pinMode(MAXDO, INPUT_PULLUP);
   for (int i = 0; i < NUM_THERMOCOUPLES; i++) {
-    pinMode(TC_CS_PINS[i], OUTPUT);
-    digitalWrite(TC_CS_PINS[i], HIGH);
+    pinMode(TC_CS_PINS[i], OUTPUT); digitalWrite(TC_CS_PINS[i], HIGH);
   }
 }
 
-// uint32_t max31855_read_raw(int csPin) {
-//   uint32_t v = 0;
-//   digitalWrite(TFT_CS, HIGH); // SPI Guard
-//   digitalWrite(csPin, LOW);
-//   delayMicroseconds(2);
-//   for (int i = 31; i >= 0; i--) {
-//     digitalWrite(MAXCLK, HIGH); delayMicroseconds(2);
-//     if (digitalRead(MAXDO)) v |= (1UL << i);
-//     digitalWrite(MAXCLK, LOW); delayMicroseconds(2);
-//   }
-//   digitalWrite(csPin, HIGH);
-//   return v;
-// }
-
 uint32_t max31855_read_raw(int csPin) {
   uint32_t v = 0;
-
-  // 1. Safety Guard (Still good practice to keep TFT quiet)
-  digitalWrite(TFT_CS, HIGH); 
-
-  // 2. Configure SPI settings: 1MHz clock, MSB First, Mode 0
-  sensorSPI->beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-
-  // 3. Select the sensor
+  digitalWrite(TFT_CS, HIGH); // SPI Guard
   digitalWrite(csPin, LOW);
-  
-  // 4. Read 32 bits (4 bytes) of data
-  // The MAX31855 sends 32 bits. We can read them byte-by-byte or as a block.
-  // Using transfer32 is the most efficient way on ESP32.
-  v = sensorSPI->transfer32(0); 
-
-  // 5. Deselect the sensor
+  delayMicroseconds(2);
+  for (int i = 31; i >= 0; i--) {
+    digitalWrite(MAXCLK, HIGH); delayMicroseconds(2);
+    if (digitalRead(MAXDO)) v |= (1UL << i);
+    digitalWrite(MAXCLK, LOW); delayMicroseconds(2);
+  }
   digitalWrite(csPin, HIGH);
-
-  // 6. Release SPI bus
-  sensorSPI->endTransaction();
-
   return v;
 }
 
