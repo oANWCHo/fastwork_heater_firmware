@@ -288,28 +288,50 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
   switch (_current_screen) {
     case SCREEN_STANDBY: {
       const int num_items = 6;
-      _standby_selection = (_standby_selection + change % num_items + num_items) % num_items;
+      int new_pos = _standby_selection + change;
+      
+      // Clamp values (Stop at 0 and Max)
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      
+      _standby_selection = new_pos;
       break;
     }
   
     case SCREEN_SETTINGS_PAGE_1: { 
       const int num_items = MENU_PAGE1_ITEM_COUNT;
-      _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
+      int new_pos = _selected_menu_item + change;
+      
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      
+      _selected_menu_item = new_pos;
       break;
     }
     
     case SCREEN_SETTINGS_PAGE_2: { 
       const int num_items = MENU_PAGE2_ITEM_COUNT;
-      _selected_menu_item_page_2 = (_selected_menu_item_page_2 + change % num_items + num_items) % num_items;
+      int new_pos = _selected_menu_item_page_2 + change;
+      
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      
+      _selected_menu_item_page_2 = new_pos;
       break;
     }
     
     case SCREEN_SETTINGS_CALIBRATION_SELECT: {
       const int num_items = 3; 
-      _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
+      int new_pos = _selected_menu_item + change;
+      
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      
+      _selected_menu_item = new_pos;
       break;
     }
 
+    // --- Numeric Adjustments (Already Clamped, kept same) ---
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP: {
       _temp_edit_value += (float)change * 0.5f;
       if (_temp_edit_value < 0) _temp_edit_value = 0;
@@ -342,21 +364,35 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       if (_temp_edit_value > 800) _temp_edit_value = 800; 
       break;
     }
+    // --------------------------------------------------------
+
     case SCREEN_SETTINGS_IDLE_OFF: {
       const int num_items = IDLE_OFF_ITEM_COUNT;
-      _selected_menu_item = (_selected_menu_item + change % num_items + num_items) % num_items;
+      int new_pos = _selected_menu_item + change;
+      
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      
+      _selected_menu_item = new_pos;
       break;
     }
-    case SCREEN_SETTINGS_SOUND: { // <-- RENAMED
+    
+    case SCREEN_SETTINGS_SOUND: { 
       if (change != 0) { 
-        // Only one option, so just toggle sound
         config.sound_on = !config.sound_on;
         if (_save_callback) _save_callback(config);
       }
       break;
     }
+    
     case SCREEN_SETTINGS_TEMP_UNIT: {
-      _selected_menu_item = (_selected_menu_item == 0) ? 1 : 0;
+      // Changed to clamp instead of toggle, so direction matters
+      // 0 = Celsius, 1 = Fahrenheit
+      int new_pos = _selected_menu_item + change;
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos > 1) new_pos = 1;
+      
+      _selected_menu_item = new_pos;
       break;
     }
     default: return false;
@@ -459,7 +495,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     } else {
       snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
     }
-    
+
     _spr.setTextDatum(MR_DATUM); 
     _spr.setTextSize(FONT_SIZE); 
     
