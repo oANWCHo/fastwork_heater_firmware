@@ -122,91 +122,40 @@ void tpo_set_percent(int index, float percent);
 // void TaskMAX(void *pvParameters) {
 //   const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10Hz
 //   TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-//   // Get TFT's SPI instance (HSPI)
-//   SPIClass& hspi = tft.getSPIinstance();
 
-//   for (;;) {
-//     float local_tc[3];
-//     uint8_t local_fault[3];
-    
-//     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
-      
-//       for (int i = 0; i < 3; i++) {
-//         // Guard TFT
-//         digitalWrite(TFT_CS, HIGH);
-        
-//         // Read MAX31855 using hardware SPI
-//         hspi.beginTransaction(maxSettings);
-//         digitalWrite(TC_CS_PINS[i], LOW);
-//         delayMicroseconds(1);
-        
-//         uint32_t raw = 0;
-//         raw |= ((uint32_t)hspi.transfer(0x00)) << 24;
-//         raw |= ((uint32_t)hspi.transfer(0x00)) << 16;
-//         raw |= ((uint32_t)hspi.transfer(0x00)) << 8;
-//         raw |= ((uint32_t)hspi.transfer(0x00));
-        
-//         digitalWrite(TC_CS_PINS[i], HIGH);
-//         hspi.endTransaction();
-        
-//         // Parse
-//         if (raw == 0 || raw == 0xFFFFFFFF) {
-//           local_tc[i] = NAN;
-//           local_fault[i] = 0xFF; // Wiring error
-//         } 
-//         else if (raw & 0x10000) {
-//           local_tc[i] = NAN;
-//           local_fault[i] = (raw & 0x07);
-//         }
-//         else {
-//           int32_t tc14 = (int32_t)((raw >> 18) & 0x3FFF);
-//           if (raw & 0x20000000) tc14 -= 16384;
-//           local_tc[i] = (float)tc14 * 0.25f;
-//           local_fault[i] = 0;
-//         }
-//       }
-      
-//       xSemaphoreGive(spiMutex);
-//     }
+//   // --- [Config Moving Average] ---
+//   const int MA_WINDOW = 10;
+//   static float ma_buffer[3][MA_WINDOW]; 
+//   static int ma_idx[3] = {0, 0, 0};
+//   static int ma_count[3] = {0, 0, 0};
 
-//     // Update shared state outside SPI mutex
-//     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-//       for(int i = 0; i < 3; i++) {
-//         if(!isnan(local_tc[i])) {
-//           sysState.tc_temps[i] = local_tc[i] + config.tc_offsets[i];
-//         } else {
-//           sysState.tc_temps[i] = NAN;
-//         }
-//         sysState.tc_faults[i] = local_fault[i];
-//       }
-//       xSemaphoreGive(dataMutex);
-//     }
-    
-//     freq_max_cnt++;
-//     vTaskDelayUntil(&xLastWakeTime, xFrequency);
+//   // --- [Watchdog / Stuck Data Tracking] ---
+//   static uint32_t prev_raw_data[3] = {0, 0, 0};
+//   static uint32_t last_change_time[3] = {0, 0, 0};
+//   const uint32_t STUCK_THRESHOLD_MS = 10000; // 2 Seconds
+
+//   // Clear buffers initially
+//   for(int i=0; i<3; i++) {
+//      for(int j=0; j<MA_WINDOW; j++) ma_buffer[i][j] = 0.0f;
+//      last_change_time[i] = millis(); // Initialize timer
 //   }
-// }
-
-// void TaskMAX(void *pvParameters) {
-//   const TickType_t xFrequency = pdMS_TO_TICKS(100);
-//   TickType_t xLastWakeTime = xTaskGetTickCount();
 
 //   for (;;) {
 //     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
       
 //       // Setup bit-bang pins
-//       digitalWrite(TFT_CS, HIGH);
+//       digitalWrite(TFT_CS, HIGH); // Deselect TFT
 //       pinMode(MAXCLK, OUTPUT);
-//       digitalWrite(MAXCLK, LOW);  // CRITICAL: Start LOW
+//       digitalWrite(MAXCLK, LOW);
 //       pinMode(MAXDO, INPUT);
 
 //       for (int i = 0; i < 3; i++) {
 //         uint32_t d = 0;
         
-//         digitalWrite(TC_CS_PINS[i], LOW);
+//         digitalWrite(TC_CS_PINS[i], LOW); // Select MAX31855
 //         delayMicroseconds(2);
-        
+
+//         // Read 32 bits
 //         for (int j = 31; j >= 0; j--) {
 //           digitalWrite(MAXCLK, HIGH);
 //           delayMicroseconds(2);
@@ -216,25 +165,93 @@ void tpo_set_percent(int index, float percent);
 //           delayMicroseconds(2);
 //         }
         
-//         digitalWrite(TC_CS_PINS[i], HIGH);
+//         digitalWrite(TC_CS_PINS[i], HIGH); // Deselect MAX31855
 //         delayMicroseconds(5);
-        
-//         // Parse
-//         float temp = NAN;
-//         if (d != 0 && d != 0xFFFFFFFF && !(d & 0x10000)) {
-//           int32_t v = (d >> 18) & 0x3FFF;
-//           if (d & 0x20000000) v -= 16384;
-//           temp = v * 0.25f;
+
+//         // --- [FAULT DETECTION LOGIC] ---
+//         float raw_temp = NAN;
+//         bool is_fault = false;
+
+//         // 1. Check for SPI Bus failure (All 0s or All 1s)
+//         if (d == 0 || d == 0xFFFFFFFF) {
+//           is_fault = true;
+//         }
+//         // 2. Check MAX31855 Internal Fault Bit (D16)
+//         else if (d & 0x10000) {
+//           is_fault = true;
+//         }
+
+//         // --- [NEW: Watchdog Check (Stuck Value for 2s)] ---
+//         // Check if the raw bits are EXACTLY the same as last time
+//         if (!is_fault) { // Only check if it looks valid otherwise
+//             if (d == prev_raw_data[i]) {
+//                 // Data hasn't changed. Check timer.
+//                 if (millis() - last_change_time[i] > STUCK_THRESHOLD_MS) {
+//                     is_fault = true; // FORCE FAULT
+//                     // Optional: You can assign a specific fault code to sysState.tc_faults if you want 
+//                     // e.g. sysState.tc_faults[i] = 0xFE; 
+//                 }
+//             } else {
+//                 // Data changed. Update tracker.
+//                 prev_raw_data[i] = d;
+//                 last_change_time[i] = millis();
+//             }
+//         } else {
+//             // If already faulted (open circuit etc), reset the stuck timer
+//             prev_raw_data[i] = d;
+//             last_change_time[i] = millis();
+//         }
+
+//         // --- [Processing] ---
+//         if (is_fault) {
+//            raw_temp = NAN;
+//            // IMPORTANT: Reset Moving Average on fault
+//            // This prevents "stale" data from showing when you plug it back in
+//            ma_count[i] = 0;
+//            ma_idx[i] = 0;
+//         } else {
+//            // Parse Temperature (Bits 31-18)
+//            int32_t v = (d >> 18) & 0x3FFF;
+//            if (d & 0x20000000) v -= 16384; // Handle negative temps
+//            raw_temp = v * 0.25f;
 //         }
         
-//         // Update state
+//         // --- [Moving Average Calculation] ---
+//         float final_temp = NAN;
+
+//         if (!is_fault) {
+//            // Add to buffer
+//            ma_buffer[i][ma_idx[i]] = raw_temp;
+//            ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
+//            if (ma_count[i] < MA_WINDOW) ma_count[i]++;
+
+//            // Calculate Average
+//            float sum = 0;
+//            for(int k=0; k < ma_count[i]; k++) {
+//               sum += ma_buffer[i][k];
+//            }
+//            final_temp = sum / ma_count[i];
+
+//            // (Optional) Low temp noise fix
+//            if (final_temp < 25.0f) final_temp = 25.0f;
+//         }
+
+//         // --- [Update System State] ---
 //         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-//           sysState.tc_temps[i] = isnan(temp) ? NAN : temp + config.tc_offsets[i];
-//           sysState.tc_faults[i] = (d & 0x10000) ? (d & 0x07) : 0;
+//           if (isnan(final_temp)) {
+//              sysState.tc_temps[i] = NAN; // Send NAN to UI
+//           } else {
+//              sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
+//           }
+          
+//           // Save fault code
+//           // If we forced a fault via watchdog, d might look valid, 
+//           // so we can distinguish it if needed, otherwise just send 0 or existing error bits
+//           sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0; 
+          
 //           xSemaphoreGive(dataMutex);
 //         }
 //       }
-      
 //       xSemaphoreGive(spiMutex);
 //     }
     
@@ -248,102 +265,124 @@ void TaskMAX(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   // --- [Config Moving Average] ---
-  const int MA_WINDOW = 10;     // จำนวนค่าที่จะนำมาเฉลี่ย (ยิ่งเยอะยิ่งนิ่ง แต่ตอบสนองช้า)
-  static float ma_buffer[3][MA_WINDOW]; // Buffer เก็บค่า
-  static int ma_idx[3] = {0, 0, 0};     // Index ปัจจุบัน
-  static int ma_count[3] = {0, 0, 0};   // นับจำนวนข้อมูลที่มี (สำหรับการเริ่มต้น)
+  const int MA_WINDOW = 10;
+  static float ma_buffer[3][MA_WINDOW]; 
+  static int ma_idx[3] = {0, 0, 0};
+  static int ma_count[3] = {0, 0, 0};
 
-  // เคลียร์ค่าเริ่มต้นเป็น 0
+  // --- [Watchdog / Stuck Data Tracking] ---
+  static uint32_t prev_raw_data[3] = {0, 0, 0};
+  static uint32_t last_change_time[3] = {0, 0, 0};
+  const uint32_t STUCK_THRESHOLD_MS = 2000; // 2 Seconds
+
+  // --- [Hardware SPI Setup] ---
+  // Use VSPI (ID 3) because TFT is using HSPI
+  SPIClass * vspi = new SPIClass(VSPI); 
+  
+  // begin(SCLK, MISO, MOSI, SS)
+  // MOSI and SS are set to -1 (unused)
+  vspi->begin(MAXCLK, MAXDO, -1, -1); 
+  
+  // Define SPI Settings: 1MHz, MSB First, Mode 0
+  SPISettings maxSettings(1000000, MSBFIRST, SPI_MODE0);
+
+  // Clear buffers
   for(int i=0; i<3; i++) {
      for(int j=0; j<MA_WINDOW; j++) ma_buffer[i][j] = 0.0f;
+     last_change_time[i] = millis(); 
   }
 
   for (;;) {
+    // Lock SPI Mutex to prevent conflict if other tasks try to use VSPI (unlikely here, but safe)
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
       
-      // Setup bit-bang pins
-      digitalWrite(TFT_CS, HIGH);
-      pinMode(MAXCLK, OUTPUT);
-      digitalWrite(MAXCLK, LOW);
-      pinMode(MAXDO, INPUT);
+      digitalWrite(TFT_CS, HIGH); // Safety: Deselect TFT
+      
+      // Start Transaction
+      vspi->beginTransaction(maxSettings);
 
       for (int i = 0; i < 3; i++) {
         uint32_t d = 0;
-        digitalWrite(TC_CS_PINS[i], LOW);
-        delayMicroseconds(2);
         
-        // Read 32 bits
-        for (int j = 31; j >= 0; j--) {
-          digitalWrite(MAXCLK, HIGH);
-          delayMicroseconds(2);
-          d <<= 1;
-          if (digitalRead(MAXDO)) d |= 1;
-          digitalWrite(MAXCLK, LOW);
-          delayMicroseconds(2);
-        }
+        digitalWrite(TC_CS_PINS[i], LOW); // Select MAX31855
         
-        digitalWrite(TC_CS_PINS[i], HIGH);
-        delayMicroseconds(5);
+        // --- [HARDWARE SPI READ] ---
+        // Transfer 32 bits (sends 0s, reads data)
+        d = vspi->transfer32(0); 
+        
+        digitalWrite(TC_CS_PINS[i], HIGH); // Deselect MAX31855
 
-        // Parse Raw Temp
+        // --- [FAULT DETECTION LOGIC] ---
         float raw_temp = NAN;
         bool is_fault = false;
 
-        if (d == 0 || d == 0xFFFFFFFF || (d & 0x10000)) {
-           is_fault = true;
+        // 1. SPI Bus Failure (All 0 or All 1)
+        if (d == 0 || d == 0xFFFFFFFF) {
+          is_fault = true;
+        }
+        // 2. Internal MAX31855 Fault Bit (D16)
+        else if (d & 0x10000) {
+          is_fault = true;
+        }
+
+        // --- [Watchdog: Check for Frozen Data] ---
+        if (!is_fault) { 
+            if (d == prev_raw_data[i]) {
+                // Bits are exactly the same. Check time.
+                if (millis() - last_change_time[i] > STUCK_THRESHOLD_MS) {
+                    is_fault = true; // FORCE FAULT
+                }
+            } else {
+                // Data changed. Reset tracker.
+                prev_raw_data[i] = d;
+                last_change_time[i] = millis();
+            }
+        } else {
+            // Already faulted, just update tracker
+            prev_raw_data[i] = d;
+            last_change_time[i] = millis();
+        }
+
+        // --- [Processing] ---
+        if (is_fault) {
            raw_temp = NAN;
-           // Reset MA counter เมื่อ Sensor หลุด เพื่อไม่ให้เอาค่าเก่ามาเฉลี่ย
-           ma_count[i] = 0; 
+           ma_count[i] = 0; // Reset average on fault
            ma_idx[i] = 0;
         } else {
+           // Extract Temp (Bits 31-18)
            int32_t v = (d >> 18) & 0x3FFF;
-           if (d & 0x20000000) v -= 16384;
-           raw_temp = v * 0.25f; // คูณ 0.25 ตามสูตรมาตรฐาน
+           if (d & 0x20000000) v -= 16384; // Negative handling
+           raw_temp = v * 0.25f;
         }
         
-        // --- [Calculated Moving Average] ---
+        // --- [Moving Average] ---
         float final_temp = NAN;
-
         if (!is_fault) {
-           // 1. เก็บค่าลง Buffer
            ma_buffer[i][ma_idx[i]] = raw_temp;
-           
-           // 2. เลื่อน Index และนับจำนวน
            ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
            if (ma_count[i] < MA_WINDOW) ma_count[i]++;
 
-           // 3. หาค่าเฉลี่ย
            float sum = 0;
-           for(int k=0; k < ma_count[i]; k++) {
-              sum += ma_buffer[i][k];
-           }
+           for(int k=0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
            final_temp = sum / ma_count[i];
-
-           // --- [Low Temp Logic (< 50)] ---
-           if (final_temp < 25.0f) {
-              
-              // Action 1: ถ้าต่ำกว่า 0 ให้ปัดเป็น 0 (แก้ปัญหาค่าติดลบที่ผิดปกติ)
-              // if (final_temp < 0.0f) final_temp = 0.0f;
-              final_temp = 25.0f;
-
-              // Action 2 (Optional): ถ้าต้องการ Offset พิเศษเฉพาะช่วงอุณหภูมิต่ำ
-              // final_temp += 2.0f; // ตัวอย่าง: บวกเพิ่ม 2 องศาถ้ามันอ่านต่ำไป
-           }
+           
+           if (final_temp < 25.0f) final_temp = 25.0f;
         }
 
-        // Update state
+        // --- [Update System State] ---
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
           if (isnan(final_temp)) {
-             sysState.tc_temps[i] = NAN;
+             sysState.tc_temps[i] = NAN; 
           } else {
-             sysState.tc_temps[i] = final_temp + config.tc_offsets[i]; // บวก Offset รวมอีกที
+             sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
           }
-          
-          sysState.tc_faults[i] = (d & 0x10000) ? (d & 0x07) : 0;
+          // Store fault code (masked for display if needed)
+          sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0; 
           xSemaphoreGive(dataMutex);
         }
       }
       
+      vspi->endTransaction();
       xSemaphoreGive(spiMutex);
     }
     
@@ -354,13 +393,27 @@ void TaskMAX(void *pvParameters) {
 
 // 2. MLX90614 TASK (I2C - Medium Priority)
 void TaskMLX(void *pvParameters) {
-  const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(100); 
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   for (;;) {
-    // Read I2C
-    float ir1 = mlx1.readObjectTempC();
-    float ir2 = mlx2.readObjectTempC();
+    float ir1 = NAN;
+    float ir2 = NAN;
+
+    // Check IR1 Connection
+    Wire.beginTransmission(IR1_ADDR);
+    if (Wire.endTransmission() == 0) {
+      ir1 = mlx1.readObjectTempC();
+      // Filter out standard library error values if any (some return 1037.55 on error)
+      if (ir1 > 1000) ir1 = NAN; 
+    }
+
+    // Check IR2 Connection
+    Wire.beginTransmission(IR2_ADDR);
+    if (Wire.endTransmission() == 0) {
+      ir2 = mlx2.readObjectTempC();
+      if (ir2 > 1000) ir2 = NAN;
+    }
 
     // Update Data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
@@ -422,13 +475,14 @@ void TaskControl(void *pvParameters) {
 
 // 4. INPUT TASK (Medium Priority)
 void TaskInput(void *pvParameters) {
-  const TickType_t xFrequency = pdMS_TO_TICKS(20); // 50Hz Check
+  const TickType_t xFrequency = pdMS_TO_TICKS(20);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
-  // ตัวแปรสำหรับ Double Click Logic
-  static uint32_t last_click_time = 0;
-  static bool awaiting_double = false;
-  const uint32_t DOUBLE_CLICK_MS = 400; // ระยะเวลาในการรอคลิกที่ 2
+  // Vars for Long Press Logic
+  static int lastBtn = HIGH;
+  static uint32_t press_start_time = 0;
+  static bool ignore_release = false; // Set true if long press happened
+  const uint32_t LONG_PRESS_MS = 1000;
 
   for (;;) {
     // 1. Encoder Rotation
@@ -441,47 +495,49 @@ void TaskInput(void *pvParameters) {
       }
     }
 
-    // 2. Encoder Switch (Double Click Logic)
-    static int lastBtn = HIGH;
+    // 2. Encoder Switch (Long Press = Back, Short Click = Select)
     int curBtn = digitalRead(ENCODER_SW);
-    
-    // ตรวจจับการกด (Falling Edge)
+
+    // --- Button State Machine ---
     if (lastBtn == HIGH && curBtn == LOW) {
-      if (awaiting_double) {
-         // --- DOUBLE CLICK DETECTED ---
-         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            ui.handleButtonDoubleClick(config); // เรียกฟังก์ชันถอยกลับ
-            xSemaphoreGive(dataMutex);
-         }
-         beep_queue += 2; // Beep
-         awaiting_double = false; // Reset สถานะ
-      } else {
-         // --- FIRST CLICK DETECTED ---
-         awaiting_double = true;
-         last_click_time = millis();
-         beep_queue += 2; // Beep ตอบสนองทันทีที่กดครั้งแรก
+      // PRESS STARTED
+      press_start_time = millis();
+      ignore_release = false;
+    }
+    else if (lastBtn == LOW && curBtn == LOW) {
+      // HOLDING
+      if (!ignore_release && (millis() - press_start_time > LONG_PRESS_MS)) {
+        // >> LONG PRESS DETECTED (Trigger Back/Return)
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          // Re-using the double click handler as it contains the "Back" logic
+          ui.handleButtonDoubleClick(config); 
+          xSemaphoreGive(dataMutex);
+        }
+        beep_queue += 2; // Beep
+        ignore_release = true; // Flag to ignore the release action
+      }
+    }
+    else if (lastBtn == LOW && curBtn == HIGH) {
+      // RELEASED
+      if (!ignore_release) {
+        // >> SHORT CLICK DETECTED (Trigger Select)
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          ui.handleButtonSingleClick(config, go_to, has_go_to);
+          xSemaphoreGive(dataMutex);
+        }
+        beep_queue += 2; // Beep
       }
     }
     lastBtn = curBtn;
 
-    // ตรวจสอบ Timeout สำหรับ Single Click
-    if (awaiting_double && (millis() - last_click_time > DOUBLE_CLICK_MS)) {
-        // หมดเวลาแล้วไม่มีการกดซ้ำ -> ยืนยันว่าเป็น Single Click
-        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-           ui.handleButtonSingleClick(config, go_to, has_go_to);
-           xSemaphoreGive(dataMutex);
-        }
-        awaiting_double = false;
-    }
-
-    // 3. PCF8574 (ปุ่มแยก)
+    // 3. PCF8574 (External Buttons)
     Wire.requestFrom(PCF_ADDR, 1);
     if (Wire.available()) {
        uint8_t input_data = Wire.read();
        bool btn[4] = { !(input_data & 1), !(input_data & 2), !(input_data & 4), !(input_data & 8) };
        for(int i=0; i<4; i++) {
          if(btn[i] && !pcf_state.btn_pressed[i]) {
-           beep_queue += 2; // เพิ่มทีละ 2 เพื่อให้ Buzzer Logic แบบเก่าทำงานได้
+           beep_queue += 2;
            if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
              if(i < 3) config.heater_active[i] = !config.heater_active[i];
              else { 

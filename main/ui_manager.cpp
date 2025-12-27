@@ -440,18 +440,26 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     _spr.setTextSize(FONT_SIZE); 
     _spr.drawString(labels[i], 5, y + (LINE_SPACING / 2));
 
-    if (!isnan(temps_c[i])) {
-      last_valid_standby_temps[i] = temps_c[i];
+    float display_temp;
+    
+    // If the CURRENT reading is NAN (Sensor Fault/Unplugged), we enforce NAN immediately
+    if (isnan(temps_c[i])) {
+       display_temp = NAN;
+       // We also invalidate the 'last_valid' cache so it doesn't recover ghost data later
+       last_valid_standby_temps[i] = NAN; 
+    } else {
+       // Only update history if we have a valid reading
+       last_valid_standby_temps[i] = temps_c[i];
+       display_temp = convertTemp(temps_c[i], state.temp_unit);
     }
     
-    float display_temp = convertTemp(last_valid_standby_temps[i], state.temp_unit);
-
     char temp_buffer[20];
     if (isnan(display_temp)) { 
-      snprintf(temp_buffer, sizeof(temp_buffer), "---");
+      snprintf(temp_buffer, sizeof(temp_buffer), "---"); // Shows --- when unplugged
     } else {
       snprintf(temp_buffer, sizeof(temp_buffer), "%.2f %c", display_temp, state.temp_unit);
     }
+    
     _spr.setTextDatum(MR_DATUM); 
     _spr.setTextSize(FONT_SIZE); 
     
