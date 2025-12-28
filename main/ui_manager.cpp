@@ -22,7 +22,7 @@ const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
 };
 
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = {
-  "15 min.", "30 min.", "60 min.", "Always ON"
+  "1 min. (Debug)", "15 min.", "30 min.", "60 min.", "Always ON"
 };
 const char* temp_unit_labels[2] = {
   "Celsius (C)", "Fahrenheit (F)"
@@ -56,6 +56,17 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
   }
 
   switch (_current_screen) {
+    case SCREEN_SLEEP:
+      _spr.fillSprite(TFT_BLACK);
+      _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+      _spr.setTextDatum(MC_DATUM);
+      _spr.setTextSize(2);
+      _spr.drawString("ZZZ Sleeping...", _spr.width() / 2, _spr.height() / 2);
+      _spr.setTextSize(1);
+      _spr.drawString("Press any button to wake", _spr.width() / 2, _spr.height() / 2 + 30);
+      _spr.pushSprite(0, 0);
+      return; // Stop drawing anything else
+
     case SCREEN_STANDBY:                  drawStandbyScreen(state, config); break;
     case SCREEN_SETTINGS_PAGE_1:          drawSettingsPage1(state, config); break; 
     case SCREEN_SETTINGS_PAGE_2:          drawSettingsPage2(state, config); break; 
@@ -76,21 +87,56 @@ void UIManager::resetInactivityTimer() {
   _last_activity_time = millis();
 }
 
-void UIManager::checkInactivity() { 
-  if (_current_screen != SCREEN_STANDBY) {
-    if (millis() - _last_activity_time > INACTIVITY_TIMEOUT_MS) {
+void UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_to) { 
+  uint32_t elapsed = millis() - _last_activity_time;
+
+  // --- A. Existing Menu Timeout (Back to Standby after 10s) ---
+  if (_current_screen != SCREEN_STANDBY && _current_screen != SCREEN_SLEEP) {
+    if (elapsed > INACTIVITY_TIMEOUT_MS) {
       _current_screen = SCREEN_STANDBY;
       _menu_step_accumulator = 0.0f;
       _selected_menu_item = 0;
       _selected_menu_item_page_2 = 0; 
       _standby_selection = 0;
-      _last_activity_time = millis(); 
+      // We don't reset activity time here, so Sleep can still trigger if user does nothing in Standby
     }
-  } else {
-    resetInactivityTimer();
+  } 
+
+  // --- Sleep Logic ---
+  // If we are already sleeping, do nothing
+  if (_current_screen == SCREEN_SLEEP) return;
+
+  // Determine Timeout Duration based on config
+  uint32_t sleep_timeout = 0;
+  switch(config.idle_off_mode) {
+    case 0: sleep_timeout = 60000;    break; // 1 min (Debug)
+    case 1: sleep_timeout = 900000;   break; // 15 min
+    case 2: sleep_timeout = 1800000;  break; // 30 min
+    case 3: sleep_timeout = 3600000;  break; // 60 min
+    case 4: return; // Always ON (Never Sleep)
+  }
+
+  // Trigger Sleep
+  if (elapsed > sleep_timeout) {
+    _current_screen = SCREEN_SLEEP;
+    
+    // TURN OFF HEATERS
+    has_go_to = false;
+    go_to = NAN;
+    for(int i=0; i<3; i++) {
+        config.heater_active[i] = false;
+    }
+
   }
 }
+
 bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to) {
+  
+  if (_current_screen == SCREEN_SLEEP) {
+    _current_screen = SCREEN_STANDBY;
+    resetInactivityTimer();
+    return true; // Consume event, do not trigger button action
+  }
   resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_STANDBY:
@@ -240,6 +286,11 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
 }
 
 bool UIManager::handleButtonDoubleClick(ConfigState& config) {
+  if (_current_screen == SCREEN_SLEEP) {
+    _current_screen = SCREEN_STANDBY;
+    resetInactivityTimer();
+    return true; 
+  }
   resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_SETTINGS_PAGE_1: 
@@ -279,6 +330,11 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
 }
 
 bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
+  if (_current_screen == SCREEN_SLEEP) {
+    _current_screen = SCREEN_STANDBY;
+    resetInactivityTimer();
+    return true; 
+  }
   resetInactivityTimer();
   _menu_step_accumulator += steps;
   int change = (int)_menu_step_accumulator;
