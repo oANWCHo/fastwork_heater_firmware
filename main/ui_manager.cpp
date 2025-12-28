@@ -17,8 +17,14 @@ const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
 };
 
 const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
-  "Turn off When Idle", "Sound", "Temp Unit", "About", // <-- RENAMED
+  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "About", // <-- RENAMED
   "< Prev Page"
+};
+
+const char* startup_mode_labels[STARTUP_MODE_COUNT] = {
+  "Safe (Reset OFF)", 
+  "Restore Last", 
+  "Auto Run"
 };
 
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = {
@@ -76,7 +82,8 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_SETTINGS_HEATER_CALIBRATE:  drawSettingsHeaterCalibrate(state); break;
     case SCREEN_SETTINGS_CALIBRATION_SELECT: drawSettingsCalibrationSelect(state, config); break; 
     case SCREEN_SETTINGS_IDLE_OFF:        drawSettingsIdleOff(state, config); break;
-    case SCREEN_SETTINGS_SOUND:           drawSettingsSound(state, config); break; // <-- RENAMED
+    case SCREEN_SETTINGS_STARTUP:  drawSettingsStartup(state, config); break;
+    case SCREEN_SETTINGS_SOUND:           drawSettingsSound(state, config); break; 
     case SCREEN_SETTINGS_TEMP_UNIT:       drawSettingsTempUnit(state, config); break;
     case SCREEN_SETTINGS_ABOUT:           drawSettingsAbout(state); break;
   }
@@ -126,6 +133,30 @@ bool UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_
     return true;
   }
   return false;
+}
+
+void UIManager::drawSettingsStartup(const AppState& state, const ConfigState& config) {
+  _spr.fillSprite(TFT_BLACK);
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(TC_DATUM);
+  _spr.setTextSize(2);
+  _spr.drawString("Startup Mode", _spr.width() / 2, 20);
+
+  for (int i = 0; i < STARTUP_MODE_COUNT; ++i) {
+    _spr.setTextDatum(MC_DATUM);
+    _spr.setTextSize(2);
+    if (i == _selected_menu_item) {
+        _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
+    } else {
+        _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+    }
+    _spr.drawString(startup_mode_labels[i], _spr.width() / 2, 80 + i * 40);
+  }
+  
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.setTextDatum(BC_DATUM);
+  _spr.setTextSize(1);
+  _spr.drawString("Rot: Select | Press: Save", _spr.width() / 2, _spr.height() - 10);
 }
 
 bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to) {
@@ -201,8 +232,13 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           _current_screen = SCREEN_SETTINGS_IDLE_OFF;
           _selected_menu_item = config.idle_off_mode; 
           break;
-        case MENU_PAGE2_SOUND: // <-- RENAMED
-          _current_screen = SCREEN_SETTINGS_SOUND; // <-- RENAMED
+        case MENU_PAGE2_STARTUP: 
+          _current_screen = SCREEN_SETTINGS_STARTUP;
+          _selected_menu_item = (int)config.startup_mode; 
+          if (_selected_menu_item >= STARTUP_MODE_COUNT) _selected_menu_item = 0;
+          break;
+        case MENU_PAGE2_SOUND: 
+          _current_screen = SCREEN_SETTINGS_SOUND; 
           _selected_menu_item = 0;
           break;
         case MENU_PAGE2_TEMP_UNIT:
@@ -267,7 +303,14 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       // It's handled by rotation, but a click here has no effect
       // We return true to acknowledge the click, but do nothing
       return true;
-      
+    
+    case SCREEN_SETTINGS_STARTUP: // <--- NEW LOGIC
+      config.startup_mode = (StartupMode)_selected_menu_item;
+      if (_save_callback) _save_callback(config);
+      _current_screen = SCREEN_SETTINGS_PAGE_2; 
+      _menu_step_accumulator = 0.0f;
+      return true;
+
     case SCREEN_SETTINGS_TEMP_UNIT:
       config.temp_unit = (_selected_menu_item == 0) ? 'C' : 'F';
       _current_screen = SCREEN_SETTINGS_PAGE_2; 
@@ -315,6 +358,7 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
       break;
 
     case SCREEN_SETTINGS_IDLE_OFF:
+    case SCREEN_SETTINGS_STARTUP:
     case SCREEN_SETTINGS_TEMP_UNIT:
     case SCREEN_SETTINGS_SOUND: 
     case SCREEN_SETTINGS_ABOUT:
@@ -418,7 +462,15 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       if (_temp_edit_value > 800) _temp_edit_value = 800; 
       break;
     }
-    // --------------------------------------------------------
+
+    case SCREEN_SETTINGS_STARTUP: { 
+      const int num_items = STARTUP_MODE_COUNT;
+      int new_pos = _selected_menu_item + change;
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos >= num_items) new_pos = num_items - 1;
+      _selected_menu_item = new_pos;
+      break;
+    }
 
     case SCREEN_SETTINGS_IDLE_OFF: {
       const int num_items = IDLE_OFF_ITEM_COUNT;

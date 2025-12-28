@@ -14,6 +14,7 @@ enum UIScreen {
   SCREEN_SETTINGS_CALIBRATION_SELECT, 
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
+  SCREEN_SETTINGS_STARTUP,
   SCREEN_SETTINGS_SOUND,
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_ABOUT
@@ -31,7 +32,8 @@ enum MenuItemPage1 {
 
 enum MenuItemPage2 {
   MENU_PAGE2_IDLE_OFF,
-  MENU_PAGE2_SOUND, // <-- RENAMED
+  MENU_PAGE2_STARTUP,  
+  MENU_PAGE2_SOUND,
   MENU_PAGE2_TEMP_UNIT,
   MENU_PAGE2_ABOUT,
   MENU_PAGE2_PREV_PAGE,
@@ -47,6 +49,13 @@ enum IdleOffMode {
   IDLE_OFF_ITEM_COUNT
 };
 
+enum StartupMode {
+  STARTUP_SAFE,      // 0: Reset Heaters to OFF
+  STARTUP_RESTORE,   // 1: Remember Checkboxes, but Stopped
+  STARTUP_AUTORUN,   // 2: Remember Checkboxes + Auto Start
+  STARTUP_MODE_COUNT
+};
+
 struct ConfigState {
   float target_temps[3];
   float max_temps[3];
@@ -57,6 +66,7 @@ struct ConfigState {
   bool sound_on;
   bool heater_active[3];
   float tc_offsets[3];
+  StartupMode startup_mode;
 };
 
 struct AppState {
@@ -110,7 +120,8 @@ private:
   void drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config); // <-- ADDED
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
-  void drawSettingsSound(const AppState& state, const ConfigState& config); // <-- RENAMED
+  void drawSettingsStartup(const AppState& state, const ConfigState& config);
+  void drawSettingsSound(const AppState& state, const ConfigState& config); 
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
 

@@ -602,6 +602,49 @@ void setup() {
   preferences.begin("app_config", false);
   loadConfig(config);
 
+  if (config.max_temp_lock == 0.0f) {
+      Serial.println("Config Invalid (Zeros). Loading Defaults...");
+      
+      config.max_temp_lock = 400.0f; // Allow up to 400C by default
+      config.temp_unit = 'C';
+      config.idle_off_mode = IDLE_OFF_30_MIN;
+      config.startup_mode = STARTUP_SAFE;
+      config.sound_on = true;
+
+      for(int i=0; i<3; i++) {
+         config.target_temps[i] = 200.0f;  // Safe default
+         config.max_temps[i] = 250.0f;    // Safe default
+         config.tc_offsets[i] = 0.0f;
+         config.heater_active[i] = false;
+      }
+      saveConfig(config); // Save these defaults so they persist
+  }
+
+  if (config.startup_mode == STARTUP_SAFE) {
+    // Mode 0: Force everything OFF
+    config.heater_active[0] = false;
+    config.heater_active[1] = false;
+    config.heater_active[2] = false;
+    has_go_to = false;
+  } 
+  else if (config.startup_mode == STARTUP_RESTORE) {
+    // Mode 1: Restore Selection, but stay STOPPED
+    // (This matches standard behavior, no change needed)
+    has_go_to = false; 
+  }
+  else if (config.startup_mode == STARTUP_AUTORUN) {
+    // Mode 2: Auto Run if any heater is active
+    bool any_active = false;
+    for(int i=0; i<3; i++) {
+        if(config.heater_active[i]) any_active = true;
+    }
+    if (any_active) {
+        has_go_to = true;
+        go_to = NAN; // Use target temps
+        Serial.println("Auto-Run Triggered!");
+    }
+  }
+
   pinMode(SSR_PIN1, OUTPUT);
   digitalWrite(SSR_PIN1, LOW);
   pinMode(SSR_PIN2, OUTPUT);
