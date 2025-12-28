@@ -85,6 +85,7 @@ float go_to = NAN;
 bool has_go_to = false;
 volatile int beep_queue = 0;
 volatile bool beeper_active = false;
+volatile int beep_mode = 0;
 uint32_t t_next_beep_action = 0;
 const int BEEP_ON_MS = 60;
 const int BEEP_OFF_MS = 100;
@@ -119,147 +120,6 @@ void tpo_set_percent(int index, float percent);
 // ========== [Tasks] ==========
 
 // 1. MAX31855 TASK - Using Hardware SPI (HSPI from TFT)
-// void TaskMAX(void *pvParameters) {
-//   const TickType_t xFrequency = pdMS_TO_TICKS(100); // 10Hz
-//   TickType_t xLastWakeTime = xTaskGetTickCount();
-
-//   // --- [Config Moving Average] ---
-//   const int MA_WINDOW = 10;
-//   static float ma_buffer[3][MA_WINDOW];
-//   static int ma_idx[3] = {0, 0, 0};
-//   static int ma_count[3] = {0, 0, 0};
-
-//   // --- [Watchdog / Stuck Data Tracking] ---
-//   static uint32_t prev_raw_data[3] = {0, 0, 0};
-//   static uint32_t last_change_time[3] = {0, 0, 0};
-//   const uint32_t STUCK_THRESHOLD_MS = 10000; // 2 Seconds
-
-//   // Clear buffers initially
-//   for(int i=0; i<3; i++) {
-//      for(int j=0; j<MA_WINDOW; j++) ma_buffer[i][j] = 0.0f;
-//      last_change_time[i] = millis(); // Initialize timer
-//   }
-
-//   for (;;) {
-//     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
-
-//       // Setup bit-bang pins
-//       digitalWrite(TFT_CS, HIGH); // Deselect TFT
-//       pinMode(MAXCLK, OUTPUT);
-//       digitalWrite(MAXCLK, LOW);
-//       pinMode(MAXDO, INPUT);
-
-//       for (int i = 0; i < 3; i++) {
-//         uint32_t d = 0;
-
-//         digitalWrite(TC_CS_PINS[i], LOW); // Select MAX31855
-//         delayMicroseconds(2);
-
-//         // Read 32 bits
-//         for (int j = 31; j >= 0; j--) {
-//           digitalWrite(MAXCLK, HIGH);
-//           delayMicroseconds(2);
-//           d <<= 1;
-//           if (digitalRead(MAXDO)) d |= 1;
-//           digitalWrite(MAXCLK, LOW);
-//           delayMicroseconds(2);
-//         }
-
-//         digitalWrite(TC_CS_PINS[i], HIGH); // Deselect MAX31855
-//         delayMicroseconds(5);
-
-//         // --- [FAULT DETECTION LOGIC] ---
-//         float raw_temp = NAN;
-//         bool is_fault = false;
-
-//         // 1. Check for SPI Bus failure (All 0s or All 1s)
-//         if (d == 0 || d == 0xFFFFFFFF) {
-//           is_fault = true;
-//         }
-//         // 2. Check MAX31855 Internal Fault Bit (D16)
-//         else if (d & 0x10000) {
-//           is_fault = true;
-//         }
-
-//         // --- [NEW: Watchdog Check (Stuck Value for 2s)] ---
-//         // Check if the raw bits are EXACTLY the same as last time
-//         if (!is_fault) { // Only check if it looks valid otherwise
-//             if (d == prev_raw_data[i]) {
-//                 // Data hasn't changed. Check timer.
-//                 if (millis() - last_change_time[i] > STUCK_THRESHOLD_MS) {
-//                     is_fault = true; // FORCE FAULT
-//                     // Optional: You can assign a specific fault code to sysState.tc_faults if you want
-//                     // e.g. sysState.tc_faults[i] = 0xFE;
-//                 }
-//             } else {
-//                 // Data changed. Update tracker.
-//                 prev_raw_data[i] = d;
-//                 last_change_time[i] = millis();
-//             }
-//         } else {
-//             // If already faulted (open circuit etc), reset the stuck timer
-//             prev_raw_data[i] = d;
-//             last_change_time[i] = millis();
-//         }
-
-//         // --- [Processing] ---
-//         if (is_fault) {
-//            raw_temp = NAN;
-//            // IMPORTANT: Reset Moving Average on fault
-//            // This prevents "stale" data from showing when you plug it back in
-//            ma_count[i] = 0;
-//            ma_idx[i] = 0;
-//         } else {
-//            // Parse Temperature (Bits 31-18)
-//            int32_t v = (d >> 18) & 0x3FFF;
-//            if (d & 0x20000000) v -= 16384; // Handle negative temps
-//            raw_temp = v * 0.25f;
-//         }
-
-//         // --- [Moving Average Calculation] ---
-//         float final_temp = NAN;
-
-//         if (!is_fault) {
-//            // Add to buffer
-//            ma_buffer[i][ma_idx[i]] = raw_temp;
-//            ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
-//            if (ma_count[i] < MA_WINDOW) ma_count[i]++;
-
-//            // Calculate Average
-//            float sum = 0;
-//            for(int k=0; k < ma_count[i]; k++) {
-//               sum += ma_buffer[i][k];
-//            }
-//            final_temp = sum / ma_count[i];
-
-//            // (Optional) Low temp noise fix
-//            if (final_temp < 25.0f) final_temp = 25.0f;
-//         }
-
-//         // --- [Update System State] ---
-//         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-//           if (isnan(final_temp)) {
-//              sysState.tc_temps[i] = NAN; // Send NAN to UI
-//           } else {
-//              sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
-//           }
-
-//           // Save fault code
-//           // If we forced a fault via watchdog, d might look valid,
-//           // so we can distinguish it if needed, otherwise just send 0 or existing error bits
-//           sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0;
-
-//           xSemaphoreGive(dataMutex);
-//         }
-//       }
-//       xSemaphoreGive(spiMutex);
-//     }
-
-//     freq_max_cnt++;
-//     vTaskDelayUntil(&xLastWakeTime, xFrequency);
-//   }
-// }
-
 void TaskMAX(void* pvParameters) {
   const TickType_t xFrequency = pdMS_TO_TICKS(100);  // 10Hz
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -276,7 +136,7 @@ void TaskMAX(void* pvParameters) {
   const uint32_t STUCK_THRESHOLD_MS = 2000;  // 2 Seconds
 
   static uint32_t fault_start_time[3] = { 0, 0, 0 };
-  const uint32_t FAULT_HOLD_MS = 250;
+  const uint32_t FAULT_HOLD_MS = 500;
 
   // --- [Hardware SPI Setup] ---
   // Use VSPI (ID 3) because TFT is using HSPI
@@ -612,7 +472,12 @@ void TaskDisplay(void* pvParameters) {
 
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
 
-      ui.checkInactivity(config, has_go_to, go_to);
+      if (ui.checkInactivity(config, has_go_to, go_to)) {
+          // Trigger 3 Beeps at 2Hz
+          beep_mode = 1;  // Set Slow Mode
+          beep_queue = 6; // 3 Beeps (3 ON + 3 OFF actions)
+      }
+
       for (int i = 0; i < 3; i++) {
         st.tc_temps[i] = sysState.tc_temps[i];
         st.tc_faults[i] = sysState.tc_faults[i];
@@ -673,6 +538,55 @@ void TaskDebug(void* pvParameters) {
   }
 }
 
+void TaskSound(void* pvParameters) {
+  pinMode(BUZZER, OUTPUT);
+  digitalWrite(BUZZER, LOW);
+
+  for (;;) {
+    // If we have beeps in the queue
+    if (beep_queue > 0) {
+      
+      // Determine timing based on mode
+      int on_time, off_time;
+      if (beep_mode == 1) { 
+        // Sleep Mode (Slow: 2Hz => 250ms ON / 250ms OFF)
+        on_time = 250;
+        off_time = 250;
+      } else {
+        // Normal Mode (Fast Click)
+        on_time = 60;   // BEEP_ON_MS
+        off_time = 100; // BEEP_OFF_MS
+      }
+
+      // Perform Beep (Blocking is okay here because it's in its own task!)
+      if (config.sound_on) {
+          digitalWrite(BUZZER, HIGH);
+      }
+      vTaskDelay(pdMS_TO_TICKS(on_time));
+
+      digitalWrite(BUZZER, LOW);
+      vTaskDelay(pdMS_TO_TICKS(off_time));
+
+      // Decrease queue (we just did 1 full beep cycle)
+      // Note: In your old code "queue" was actions (ON+OFF), so 6 = 3 beeps.
+      // Here, let's treat 1 queue = 1 full beep for simplicity?
+      // OR keep your existing logic: 1 beep = 2 actions (ON then OFF).
+      
+      // Let's stick to your existing logic where queue = actions
+      // But since we did ON *and* OFF above, we subtract 2.
+      if (beep_queue >= 2) beep_queue -= 2;
+      else beep_queue = 0;
+
+      // Reset mode if done
+      if (beep_queue == 0) beep_mode = 0;
+
+    } else {
+      // No beeps needed, sleep for a bit to save CPU
+      vTaskDelay(pdMS_TO_TICKS(100)); 
+    }
+  }
+}
+
 // ========== [Setup & Loop] ==========
 void setup() {
   Serial.begin(115200);
@@ -727,6 +641,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskInput, "Input", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskDisplay, "Display", 8192, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskDebug, "Debug", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(TaskSound, "Sound", 2048, NULL, 1, NULL, 1);
 
   // 4. Start TPO Interrupt
   tpo_ticker.attach_ms(1, tpo_isr);
@@ -735,38 +650,7 @@ void setup() {
 }
 
 void loop() {
-  // --- Buzzer Logic (ยืมจาก Old Main) ---
-  if (beep_queue > 0) {
-    if (!beeper_active) {
-      // เริ่มต้นทำงาน Beep
-      beeper_active = true;
-      t_next_beep_action = millis();
-    }
-
-    if (millis() >= t_next_beep_action) {
-      // เช็คว่าเป็นจังหวะเปิด (คู่) หรือ ปิด (คี่)
-      // ตัวอย่าง: queue=2 (ON) -> queue=1 (OFF) -> queue=0 (Done)
-      bool is_on_cycle = (beep_queue % 2 == 0);
-
-      if (is_on_cycle) {
-        if (config.sound_on) digitalWrite(BUZZER, HIGH);
-        t_next_beep_action = millis() + BEEP_ON_MS;
-      } else {
-        digitalWrite(BUZZER, LOW);
-        t_next_beep_action = millis() + BEEP_OFF_MS;
-      }
-      beep_queue--;  // ลดคิวลง
-    }
-  } else {
-    // คิวหมด ปิดถาวร
-    if (beeper_active) {
-      digitalWrite(BUZZER, LOW);
-      beeper_active = false;
-    }
-  }
-
-  // Code เดิม...
-  vTaskDelay(pdMS_TO_TICKS(50));
+  vTaskDelete(NULL);
 }
 
 // ========== [Hardware Helper Functions] ==========

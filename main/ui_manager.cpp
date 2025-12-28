@@ -22,7 +22,7 @@ const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
 };
 
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = {
-  "1 min. (Debug)", "15 min.", "30 min.", "60 min.", "Always ON"
+  "10 sec. (Debug)", "15 min.", "30 min.", "60 min.", "Always ON"
 };
 const char* temp_unit_labels[2] = {
   "Celsius (C)", "Fahrenheit (F)"
@@ -87,7 +87,7 @@ void UIManager::resetInactivityTimer() {
   _last_activity_time = millis();
 }
 
-void UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_to) { 
+bool UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_to) { 
   uint32_t elapsed = millis() - _last_activity_time;
 
   // --- A. Existing Menu Timeout (Back to Standby after 10s) ---
@@ -104,16 +104,16 @@ void UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_
 
   // --- Sleep Logic ---
   // If we are already sleeping, do nothing
-  if (_current_screen == SCREEN_SLEEP) return;
+  if (_current_screen == SCREEN_SLEEP) return false;
 
   // Determine Timeout Duration based on config
   uint32_t sleep_timeout = 0;
   switch(config.idle_off_mode) {
-    case 0: sleep_timeout = 60000;    break; // 1 min (Debug)
+    case 0: sleep_timeout = 10000;    break; // 10 sec. (Debug)
     case 1: sleep_timeout = 900000;   break; // 15 min
     case 2: sleep_timeout = 1800000;  break; // 30 min
     case 3: sleep_timeout = 3600000;  break; // 60 min
-    case 4: return; // Always ON (Never Sleep)
+    case 4: return false; // Always ON (Never Sleep)
   }
 
   // Trigger Sleep
@@ -123,11 +123,9 @@ void UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_
     // TURN OFF HEATERS
     has_go_to = false;
     go_to = NAN;
-    for(int i=0; i<3; i++) {
-        config.heater_active[i] = false;
-    }
-
+    return true;
   }
+  return false;
 }
 
 bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to) {

@@ -39,7 +39,7 @@ enum MenuItemPage2 {
 };
 
 enum IdleOffMode {
-  IDLE_OFF_1_MIN,
+  IDLE_OFF_10_SEC,
   IDLE_OFF_15_MIN,
   IDLE_OFF_30_MIN,
   IDLE_OFF_60_MIN,
@@ -83,7 +83,7 @@ public:
   bool handleButtonDoubleClick(ConfigState& config);
   bool handleEncoderRotation(float steps, ConfigState& config);
 
-  void checkInactivity(ConfigState& config, bool& has_go_to, float& go_to);
+  bool checkInactivity(ConfigState& config, bool& has_go_to, float& go_to);
   void resetInactivityTimer();
 
 private:
