@@ -5,6 +5,7 @@
 
 enum UIScreen {
   SCREEN_STANDBY,
+  SCREEN_QUICK_EDIT,
   SCREEN_SLEEP,
   SCREEN_SETTINGS_PAGE_1, 
   SCREEN_SETTINGS_PAGE_2, 
@@ -23,9 +24,6 @@ enum UIScreen {
 };
 
 enum MenuItemPage1 {
-  MENU_PAGE1_HEATER_1,
-  MENU_PAGE1_HEATER_2,
-  MENU_PAGE1_HEATER_3,
   MENU_PAGE1_MAX_TEMP_LOCK,
   MENU_PAGE1_CALIBRATION, 
   MENU_PAGE1_EMISSIVITY,
@@ -84,6 +82,12 @@ struct AppState {
   char temp_unit;
   uint8_t tc_faults[3];
   bool heater_cutoff_state[3];
+  bool heater_ready[3];
+};
+
+enum QuickEditStep {
+  Q_EDIT_TARGET,
+  Q_EDIT_MAX
 };
 
 typedef void (*ConfigSaveCallback)(const ConfigState& config);
@@ -103,10 +107,18 @@ public:
   bool checkInactivity(ConfigState& config, bool& has_go_to, float& go_to);
   void resetInactivityTimer();
 
+  void openSettings();
+
+  void exitSettings();           // Called by Button 1 to close settings
+  void enterQuickEdit();         // Called by Long Press in Main
+  UIScreen getScreen() const { return _current_screen; } // To check state in Main
+
 private:
   TFT_eSPI* _tft;
   TFT_eSprite _spr;
   UIScreen _current_screen;
+  QuickEditStep _quick_edit_step;
+
   bool _blink_state;
   int _selected_menu_item; 
   int _selected_menu_item_page_2; 
@@ -133,9 +145,12 @@ private:
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
-
+  void drawTaskBar();
+  
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
+
+  uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 };
 
 #endif // UI_MANAGER_H
