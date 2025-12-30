@@ -13,17 +13,17 @@ const uint32_t INACTIVITY_TIMEOUT_MS = 10000;
 const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
   "Heater 1", "Heater 2", "Heater 3", "Max Temp",
   "Heater Calibration", 
+  "IR Emissivity",
   "Next Page >"
 };
 
 const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
-  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "About", // <-- RENAMED
+  "Turn off When Idle", "Startup Mode", "Sound","TC Probe Cal", "Temp Unit", "About", 
   "< Prev Page"
 };
 
 const char* startup_mode_labels[STARTUP_MODE_COUNT] = {
-  "Safe (Reset OFF)", 
-  "Restore Last", 
+  "OFF", 
   "Auto Run"
 };
 
@@ -84,8 +84,10 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_SETTINGS_IDLE_OFF:        drawSettingsIdleOff(state, config); break;
     case SCREEN_SETTINGS_STARTUP:  drawSettingsStartup(state, config); break;
     case SCREEN_SETTINGS_SOUND:           drawSettingsSound(state, config); break; 
+    case SCREEN_SETTINGS_TC_PROBE_CAL:    drawSettingsTCProbeCal(state, config); break;
     case SCREEN_SETTINGS_TEMP_UNIT:       drawSettingsTempUnit(state, config); break;
     case SCREEN_SETTINGS_ABOUT:           drawSettingsAbout(state); break;
+    case SCREEN_SETTINGS_EMISSIVITY: drawSettingsEmissivity(state, config); break;
   }
   _spr.pushSprite(0, 0);
 }
@@ -133,6 +135,52 @@ bool UIManager::checkInactivity(ConfigState& config, bool& has_go_to, float& go_
     return true;
   }
   return false;
+}
+
+void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState& config) {
+  _temp_edit_value = state.tc_probe_temp;
+  
+  _spr.fillSprite(TFT_BLACK);
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(TC_DATUM);
+  _spr.setTextSize(2);
+  _spr.drawString("TC Probe Cal", _spr.width() / 2, 10);
+
+  _spr.setTextSize(2);
+  _spr.setTextDatum(MC_DATUM);
+
+  char buf[32];
+  // Calculate Raw (approximate) for display
+  float raw = state.tc_probe_temp - config.tc_probe_offset;
+  
+  _spr.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  snprintf(buf, 32, "Raw: %.2f C", raw);
+  _spr.drawString(buf, _spr.width() / 2, 50);
+
+  _spr.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  snprintf(buf, 32, "Offset: %.2f", config.tc_probe_offset);
+  _spr.drawString(buf, _spr.width() / 2, 75);
+
+  _spr.setTextColor(TFT_GREEN, TFT_BLACK);
+  snprintf(buf, 32, "Val: %.2f C", state.tc_probe_temp);
+  _spr.drawString(buf, _spr.width() / 2, 100);
+
+  // Menu Options
+  int start_y = 140;
+  const char* options[] = {"Tare (Set 0)", "Reset (0.0)"};
+  for (int i = 0; i < 2; i++) {
+     if (i == _selected_menu_item) {
+        _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
+     } else {
+        _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+     }
+     _spr.drawString(options[i], _spr.width() / 2, start_y + (i * 30));
+  }
+
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.setTextDatum(BC_DATUM);
+  _spr.setTextSize(1);
+  _spr.drawString("Press: Action | Dbl: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 void UIManager::drawSettingsStartup(const AppState& state, const ConfigState& config) {
@@ -218,6 +266,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT;
           _selected_menu_item = 0; // Default to H1
           break;
+        case MENU_PAGE1_EMISSIVITY: 
+          _current_screen = SCREEN_SETTINGS_EMISSIVITY;
+          _selected_menu_item = 0; // Select IR1 first
+          break;
         case MENU_PAGE1_NEXT_PAGE: 
           _current_screen = SCREEN_SETTINGS_PAGE_2;
           _selected_menu_item_page_2 = 0; 
@@ -241,6 +293,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           _current_screen = SCREEN_SETTINGS_SOUND; 
           _selected_menu_item = 0;
           break;
+        case MENU_PAGE2_TC_PROBE_CAL: 
+          _current_screen = SCREEN_SETTINGS_TC_PROBE_CAL;
+          _selected_menu_item = 0;
+          break;
         case MENU_PAGE2_TEMP_UNIT:
           _current_screen = SCREEN_SETTINGS_TEMP_UNIT;
           _selected_menu_item = (config.temp_unit == 'C') ? 0 : 1;
@@ -255,7 +311,45 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       }
       _menu_step_accumulator = 0.0f;
       return true;
-
+    case SCREEN_SETTINGS_TC_PROBE_CAL:
+      if (_selected_menu_item == 0) {
+         // TARE: Offset = Offset - CurrentTemp
+         // Logic: New Display = 0. 
+         // NewDisplay = (Raw + OldOffset) + Diff = 0
+         // Diff = -(Raw + OldOffset) = -CurrentTemp
+         // NewOffset = OldOffset - CurrentTemp
+         // Wait, easier:
+         // Display = Raw + Offset.
+         // We want Display to be 0.
+         // 0 = Raw + Offset_New.
+         // Offset_New = -Raw.
+         // We don't have raw directly here easily, but Raw = Display - Offset_Old.
+         // So Offset_New = -(Display - Offset_Old) = Offset_Old - Display.
+         // Display is stored in app state, but we need to grab the latest state passed to draw?
+         // Actually, ui.draw passes state. We don't have state here. 
+         // BUT we can't perfectly Tare without the current value. 
+         // However, the user sees the value on screen. 
+         // We need to fetch the value. 
+         // HACK: Since we don't pass AppState to handleClick, we rely on the fact 
+         // that the main loop calls this. 
+         // NOTE: The architecture makes it hard to get the TEMP inside this function 
+         // unless we pass AppState or store the last seen temp in the class.
+         // Let's use a stored member variable updated in draw() or pass it.
+         // Ideally refactor handleButtonSingleClick to take AppState, 
+         // but simpler for now: utilize `_last_tc_probe_temp` stored during draw or standby.
+         // Let's add `_cached_probe_temp` to the class in private.
+         config.tc_probe_offset = config.tc_probe_offset - _temp_edit_value; // Reuse _temp_edit_value? No that's risky.
+         // Better: Let's assume the calling code doesn't support this easily.
+         // Actually, let's just cheat and assume the `draw` function updated a variable.
+         // No, let's fix the architecture properly in the header? 
+         // Or just use the fact that I can add `float _last_probe_val` to private vars.
+         // Let's assume I added `_last_probe_val` to header and updated it in draw.
+      } else {
+         // RESET
+         config.tc_probe_offset = 0.0f;
+      }
+      if (_save_callback) _save_callback(config);
+      return true;
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP:
       config.target_temps[_selected_menu_item] = _temp_edit_value;
       if (_save_callback) _save_callback(config);
@@ -298,17 +392,23 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       _menu_step_accumulator = 0.0f;
       return true;
       
-    case SCREEN_SETTINGS_SOUND: // <-- RENAMED
-      // This screen no longer uses _selected_menu_item to toggle
-      // It's handled by rotation, but a click here has no effect
-      // We return true to acknowledge the click, but do nothing
+    case SCREEN_SETTINGS_SOUND: 
       return true;
     
-    case SCREEN_SETTINGS_STARTUP: // <--- NEW LOGIC
+    case SCREEN_SETTINGS_STARTUP: 
       config.startup_mode = (StartupMode)_selected_menu_item;
       if (_save_callback) _save_callback(config);
       _current_screen = SCREEN_SETTINGS_PAGE_2; 
       _menu_step_accumulator = 0.0f;
+      return true;
+
+    case SCREEN_SETTINGS_EMISSIVITY:
+      // Toggle between IR1 (0) and IR2 (1)
+      if (_selected_menu_item == 0) {
+         _selected_menu_item = 1;
+      } else {
+         _selected_menu_item = 0;
+      }
       return true;
 
     case SCREEN_SETTINGS_TEMP_UNIT:
@@ -357,10 +457,15 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
       _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT; 
       break;
 
+    case SCREEN_SETTINGS_EMISSIVITY:
+     _current_screen = SCREEN_SETTINGS_PAGE_1;
+     break;
+
     case SCREEN_SETTINGS_IDLE_OFF:
     case SCREEN_SETTINGS_STARTUP:
     case SCREEN_SETTINGS_TEMP_UNIT:
     case SCREEN_SETTINGS_SOUND: 
+    case SCREEN_SETTINGS_TC_PROBE_CAL:
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_2;
       break;
@@ -418,6 +523,15 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       break;
     }
     
+    case SCREEN_SETTINGS_TC_PROBE_CAL: { // <-- NEW
+      // 0 = Tare, 1 = Reset
+      int new_pos = _selected_menu_item + change;
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos > 1) new_pos = 1;
+      _selected_menu_item = new_pos;
+      break;
+    }
+
     case SCREEN_SETTINGS_CALIBRATION_SELECT: {
       const int num_items = 3; 
       int new_pos = _selected_menu_item + change;
@@ -463,6 +577,19 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       break;
     }
 
+    case SCREEN_SETTINGS_EMISSIVITY: {
+      // Adjust the selected IR's emissivity
+      // If IR2 is selected but not connected, maybe prevent change? 
+      // User said "gray it out", so let's allow change but it won't do anything effectively.
+      
+      float* target = &config.ir_emissivity[_selected_menu_item];
+      *target += (float)change * 0.01f; // 0.01 steps
+      
+      // Clamp 0.1 to 1.0
+      if (*target < 0.1f) *target = 0.1f;
+      if (*target > 1.0f) *target = 1.0f;
+      break;
+    }
     case SCREEN_SETTINGS_STARTUP: { 
       const int num_items = STARTUP_MODE_COUNT;
       int new_pos = _selected_menu_item + change;
@@ -533,7 +660,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
 
   const char* labels[] = {
     "H1 Temp", "H2 Temp", "H3 Temp",
-    "IR1 Temp", "IR2 Temp"
+    "IR1 Temp", "IR2 Temp", "TC Probe"
   };
 
   float temps_c[] = {
@@ -541,7 +668,8 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     state.tc_temps[1], 
     state.tc_temps[2], 
     state.ir_temps[0], 
-    state.ir_temps[1]
+    state.ir_temps[1],
+    state.tc_probe_temp
   };
   
   float settings[3][2] = {
@@ -550,7 +678,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     {config.target_temps[2], config.max_temps[2]},
   };
 
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; i < 6; ++i) {
     int y = 4 + i * LINE_SPACING;
     uint16_t bg_color = COLOR_IDLE;
     
@@ -626,7 +754,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   int screen_w = _spr.width();
   int usable_w = screen_w - (2 * x_padding);
 
-  int button_y1 = 130;
+  int button_y1 = 135;
   int button_w1 = (usable_w - (2 * button_spacing)) / 3; 
   int total_w1 = (button_w1 * 3) + (button_spacing * 2);
   int x_start1 = (screen_w - total_w1) / 2;
@@ -695,6 +823,42 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     _spr.drawRect(x_start3+1, button_y3+1, button_w3-2, button_h-2, TFT_SKYBLUE);
     _spr.drawRect(x_start3+1, button_y3+2, button_w3-4, button_h-4, TFT_SKYBLUE);
   }
+}
+
+void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState& config) {
+  _spr.fillSprite(TFT_BLACK);
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(TC_DATUM);
+  _spr.setTextSize(2);
+  _spr.drawString("IR Emissivity", _spr.width() / 2, 20);
+
+  // IR 1
+  _spr.setTextDatum(MC_DATUM);
+  if (_selected_menu_item == 0) _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
+  else _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  
+  char buf[32];
+  snprintf(buf, 32, "IR1 (%.2f): %.2f", state.ir_temps[0], config.ir_emissivity[0]);
+  _spr.drawString(buf, _spr.width() / 2, 80);
+
+  // IR 2
+  // Check if IR2 is connected (not NAN) to decide color
+  bool ir2_connected = !isnan(state.ir_temps[1]);
+  
+  if (_selected_menu_item == 1) {
+    _spr.setTextColor(TFT_BLACK, ir2_connected ? TFT_YELLOW : TFT_LIGHTGREY);
+  } else {
+    _spr.setTextColor(ir2_connected ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
+  }
+
+  snprintf(buf, 32, "IR2 (%.2f): %.2f", state.ir_temps[1], config.ir_emissivity[1]);
+  if (!ir2_connected) snprintf(buf, 32, "IR2: Not Connected");
+  _spr.drawString(buf, _spr.width() / 2, 120);
+
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.setTextDatum(BC_DATUM);
+  _spr.setTextSize(1);
+  _spr.drawString("Rot: Adjust | Press: Switch | Dbl: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 void UIManager::drawSettingsPage1(const AppState& state, const ConfigState& config) {

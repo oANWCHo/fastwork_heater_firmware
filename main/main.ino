@@ -23,6 +23,7 @@
 #define MAXCS1 15  // CS1
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
+#define MAXCS4 18 // CS4
 // #define TFT_CS  10   // Guard Pin
 
 #define ENCODER_A 6
@@ -52,9 +53,11 @@ SemaphoreHandle_t serialMutex;  // Protects Serial Monitor (prevent mixed text)
 // Thread-Safe Data Model
 struct SharedData {
   float tc_temps[3];
+  float tc_probe_temp;
   float cj_temps[3];
   uint8_t tc_faults[3];
   float ir_temps[2];
+  float ir_ambient[2];
   bool heater_cutoff[3];
 };
 SharedData sysState;
@@ -68,6 +71,7 @@ volatile uint32_t freq_input_cnt = 0;
 
 // ========== [Objects & Config] ==========
 const int TC_CS_PINS[] = { MAXCS1, MAXCS2, MAXCS3 };
+const int TC_PROBE_PIN = MAXCS4;
 const int NUM_THERMOCOUPLES = 3;
 SPISettings maxSettings(1000000, MSBFIRST, SPI_MODE0);
 
@@ -121,110 +125,85 @@ void tpo_set_percent(int index, float percent);
 
 // 1. MAX31855 TASK - Using Hardware SPI (HSPI from TFT)
 void TaskMAX(void* pvParameters) {
-  const TickType_t xFrequency = pdMS_TO_TICKS(100);  // 10Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(100);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   // --- [Config Moving Average] ---
   const int MA_WINDOW = 10;
-  static float ma_buffer[3][MA_WINDOW];
-  static int ma_idx[3] = { 0, 0, 0 };
-  static int ma_count[3] = { 0, 0, 0 };
+  static float ma_buffer[4][MA_WINDOW]; // Changed to 4 (0-2 for H, 3 for Probe)
+  static int ma_idx[4] = { 0, 0, 0, 0 };
+  static int ma_count[4] = { 0, 0, 0, 0 };
 
   // --- [Watchdog / Stuck Data Tracking] ---
-  static uint32_t prev_raw_data[3] = { 0, 0, 0 };
-  static uint32_t last_change_time[3] = { 0, 0, 0 };
-  const uint32_t STUCK_THRESHOLD_MS = 2000;  // 2 Seconds
+  static uint32_t prev_raw_data[4] = { 0, 0, 0, 0 };
+  static uint32_t last_change_time[4] = { 0, 0, 0, 0 };
+  const uint32_t STUCK_THRESHOLD_MS = 2000;
 
-  static uint32_t fault_start_time[3] = { 0, 0, 0 };
+  static uint32_t fault_start_time[4] = { 0, 0, 0, 0 };
   const uint32_t FAULT_HOLD_MS = 500;
 
-  // --- [Hardware SPI Setup] ---
-  // Use VSPI (ID 3) because TFT is using HSPI
   SPIClass* vspi = new SPIClass(VSPI);
-
-  // begin(SCLK, MISO, MOSI, SS)
-  // MOSI and SS are set to -1 (unused)
   vspi->begin(MAXCLK, MAXDO, -1, -1);
-
-  // Define SPI Settings: 1MHz, MSB First, Mode 0
   SPISettings maxSettings(1000000, MSBFIRST, SPI_MODE0);
 
-  // Clear buffers
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     for (int j = 0; j < MA_WINDOW; j++) ma_buffer[i][j] = 0.0f;
     last_change_time[i] = millis();
   }
 
   for (;;) {
-    // Lock SPI Mutex to prevent conflict if other tasks try to use VSPI (unlikely here, but safe)
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
-
-      digitalWrite(TFT_CS, HIGH);  // Safety: Deselect TFT
-
-      // Start Transaction
+      digitalWrite(TFT_CS, HIGH);
       vspi->beginTransaction(maxSettings);
-
-      for (int i = 0; i < 3; i++) {
+      
+      // Loop 0-2 (Heaters) + 3 (Probe)
+      for (int i = 0; i < 4; i++) {
         uint32_t d = 0;
+        int cs_pin = (i < 3) ? TC_CS_PINS[i] : TC_PROBE_PIN; // Select CS
 
-        digitalWrite(TC_CS_PINS[i], LOW);  // Select MAX31855
-
-        // --- [HARDWARE SPI READ] ---
-        // Transfer 32 bits (sends 0s, reads data)
+        digitalWrite(cs_pin, LOW); 
         d = vspi->transfer32(0);
-
-        digitalWrite(TC_CS_PINS[i], HIGH);  // Deselect MAX31855
+        digitalWrite(cs_pin, HIGH);
 
         // --- [FAULT DETECTION LOGIC] ---
         float raw_temp = NAN;
         bool is_fault = false;
 
-        // 1. SPI Bus Failure (All 0 or All 1)
         if (d == 0 || d == 0xFFFFFFFF) {
           is_fault = true;
         }
-        // 2. Internal MAX31855 Fault Bit (D16)
         else if (d & 0x10000) {
           if (fault_start_time[i] == 0) {
-            fault_start_time[i] = millis();  // เริ่มจับเวลา
+            fault_start_time[i] = millis();
           }
-
-          // ถ้าเวลาผ่านไปนานกว่ากำหนด ให้ถือว่าเป็น Fault จริงๆ
           if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
             is_fault = true;
           }
         } else {
-          // ถ้าสถานะปกติ (ไม่มี D16 Fault) ให้รีเซ็ตเวลา
           fault_start_time[i] = 0;
         }
 
-        // --- [Watchdog: Check for Frozen Data] ---
         if (!is_fault) {
           if (d == prev_raw_data[i]) {
-            // Bits are exactly the same. Check time.
             if (millis() - last_change_time[i] > STUCK_THRESHOLD_MS) {
-              is_fault = true;  // FORCE FAULT
+              is_fault = true;
             }
           } else {
-            // Data changed. Reset tracker.
             prev_raw_data[i] = d;
             last_change_time[i] = millis();
           }
         } else {
-          // Already faulted, just update tracker
           prev_raw_data[i] = d;
           last_change_time[i] = millis();
         }
 
-        // --- [Processing] ---
         if (is_fault) {
           raw_temp = NAN;
-          ma_count[i] = 0;  // Reset average on fault
+          ma_count[i] = 0; 
           ma_idx[i] = 0;
         } else {
-          // Extract Temp (Bits 31-18)
           int32_t v = (d >> 18) & 0x3FFF;
-          if (d & 0x20000000) v -= 16384;  // Negative handling
+          if (d & 0x20000000) v -= 16384; 
           raw_temp = v * 0.25f;
         }
 
@@ -238,19 +217,27 @@ void TaskMAX(void* pvParameters) {
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
-
           if (final_temp < 25.0f) final_temp = 25.0f;
         }
 
         // --- [Update System State] ---
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-          if (isnan(final_temp)) {
-            sysState.tc_temps[i] = NAN;
+          if (i < 3) {
+              // Heaters
+              if (isnan(final_temp)) {
+                sysState.tc_temps[i] = NAN;
+              } else {
+                sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
+              }
+              sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0;
           } else {
-            sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
+              // Probe (Index 3)
+              if (isnan(final_temp)) {
+                sysState.tc_probe_temp = NAN;
+              } else {
+                sysState.tc_probe_temp = final_temp + config.tc_probe_offset; // Apply Probe Offset
+              }
           }
-          // Store fault code (masked for display if needed)
-          sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0;
           xSemaphoreGive(dataMutex);
         }
       }
@@ -270,28 +257,31 @@ void TaskMLX(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   for (;;) {
-    float ir1 = NAN;
-    float ir2 = NAN;
+    float raw_obj[2] = {NAN, NAN};
+    float raw_amb[2] = {NAN, NAN};
 
     // Check IR1 Connection
     Wire.beginTransmission(IR1_ADDR);
     if (Wire.endTransmission() == 0) {
-      ir1 = mlx1.readObjectTempC();
-      // Filter out standard library error values if any (some return 1037.55 on error)
-      if (ir1 > 1000) ir1 = NAN;
+      raw_obj[0] = mlx1.readObjectTempC();
+      raw_amb[0] = mlx1.readAmbientTempC();
+      if (raw_obj[0] > 1000) raw_obj[0] = NAN;
     }
 
     // Check IR2 Connection
     Wire.beginTransmission(IR2_ADDR);
     if (Wire.endTransmission() == 0) {
-      ir2 = mlx2.readObjectTempC();
-      if (ir2 > 1000) ir2 = NAN;
+      raw_obj[1] = mlx2.readObjectTempC();
+      raw_amb[1] = mlx2.readAmbientTempC();
+      if (raw_obj[1] > 1000) raw_obj[1] = NAN;
     }
 
     // Update Data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-      sysState.ir_temps[0] = ir1;
-      sysState.ir_temps[1] = ir2;
+      for(int i=0; i<2; i++) {
+         sysState.ir_ambient[i] = raw_amb[i]; 
+         sysState.ir_temps[i] = applyEmissivity(raw_obj[i], raw_amb[i], config.ir_emissivity[i]);
+      }
       xSemaphoreGive(dataMutex);
     }
 
@@ -469,13 +459,12 @@ void TaskInput(void* pvParameters) {
 void TaskDisplay(void* pvParameters) {
   for (;;) {
     AppState st;
+    bool alarm_active = false;
 
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-
       if (ui.checkInactivity(config, has_go_to, go_to)) {
-          // Trigger 3 Beeps at 2Hz
-          beep_mode = 1;  // Set Slow Mode
-          beep_queue = 6; // 3 Beeps (3 ON + 3 OFF actions)
+          beep_mode = 1;
+          beep_queue = 6;
       }
 
       for (int i = 0; i < 3; i++) {
@@ -483,8 +472,15 @@ void TaskDisplay(void* pvParameters) {
         st.tc_faults[i] = sysState.tc_faults[i];
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
       }
+      st.tc_probe_temp = sysState.tc_probe_temp; // <-- Pass probe temp
       st.ir_temps[0] = sysState.ir_temps[0];
       st.ir_temps[1] = sysState.ir_temps[1];
+      st.ir_ambient[0] = sysState.ir_ambient[0];
+      st.ir_ambient[1] = sysState.ir_ambient[1];
+
+      if (st.ir_ambient[0] > 80.0f || st.ir_ambient[1] > 80.0f) {
+         alarm_active = true;
+      }
       xSemaphoreGive(dataMutex);
     }
 
@@ -492,14 +488,17 @@ void TaskDisplay(void* pvParameters) {
     st.target_temp = go_to;
     st.temp_unit = config.temp_unit;
 
-    // Draw (MUST LOCK SPI)
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
       ui.draw(st, config);
       xSemaphoreGive(spiMutex);
     }
 
+    if (alarm_active) {
+       if (beep_queue == 0) beep_queue = 2;
+    }
+
     freq_disp_cnt++;
-    vTaskDelay(pdMS_TO_TICKS(100));  // 10 FPS
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -527,7 +526,9 @@ void TaskDebug(void* pvParameters) {
       Serial.println("--- [Module Data Log] ---");
       if (xSemaphoreTake(dataMutex, 100) == pdTRUE) {
         Serial.printf("  TC1: %.2f | TC2: %.2f | TC3: %.2f\n", sysState.tc_temps[0], sysState.tc_temps[1], sysState.tc_temps[2]);
-        Serial.printf("  IR1: %.2f | IR2: %.2f\n", sysState.ir_temps[0], sysState.ir_temps[1]);
+        Serial.printf("  IR1: Obj %.2f / Amb %.2f | IR2: Obj %.2f / Amb %.2f\n", 
+                      sysState.ir_temps[0], sysState.ir_ambient[0], 
+                      sysState.ir_temps[1], sysState.ir_ambient[1]);
         Serial.printf("  Target: %.2f | Active: %s\n", go_to, has_go_to ? "YES" : "NO");
         xSemaphoreGive(dataMutex);
       }
@@ -601,15 +602,18 @@ void setup() {
   // 2. Hardware Init
   preferences.begin("app_config", false);
   loadConfig(config);
-
+  
   if (config.max_temp_lock == 0.0f) {
       Serial.println("Config Invalid (Zeros). Loading Defaults...");
       
       config.max_temp_lock = 400.0f; // Allow up to 400C by default
       config.temp_unit = 'C';
       config.idle_off_mode = IDLE_OFF_30_MIN;
-      config.startup_mode = STARTUP_SAFE;
+      config.startup_mode = STARTUP_OFF;
       config.sound_on = true;
+      config.ir_emissivity[0] = 1.0f;
+      config.ir_emissivity[1] = 1.0f;
+      config.tc_probe_offset = 0.0f;
 
       for(int i=0; i<3; i++) {
          config.target_temps[i] = 200.0f;  // Safe default
@@ -620,14 +624,8 @@ void setup() {
       saveConfig(config); // Save these defaults so they persist
   }
 
-  if (config.startup_mode == STARTUP_SAFE) {
-    // Mode 0: Force everything OFF
-    config.heater_active[0] = false;
-    config.heater_active[1] = false;
-    config.heater_active[2] = false;
-    has_go_to = false;
-  } 
-  else if (config.startup_mode == STARTUP_RESTORE) {
+
+  if (config.startup_mode == STARTUP_OFF) {
     // Mode 1: Restore Selection, but stay STOPPED
     // (This matches standard behavior, no change needed)
     has_go_to = false; 
@@ -697,6 +695,26 @@ void loop() {
 }
 
 // ========== [Hardware Helper Functions] ==========
+// 2. Helper Function: Software Emissivity Correction
+// Stefan-Boltzmann Law: T_obj^4 = T_amb^4 + (T_sensor^4 - T_amb^4) / emissivity
+float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity) {
+  if (isnan(t_obj_sensor) || isnan(t_amb)) return NAN;
+  if (emissivity >= 0.99f) return t_obj_sensor; // Optimization for 1.0
+
+  // Convert to Kelvin
+  float Tk_obj = t_obj_sensor + 273.15f;
+  float Tk_amb = t_amb + 273.15f;
+
+  float term1 = pow(Tk_obj, 4);
+  float term2 = pow(Tk_amb, 4);
+
+  // Correction
+  float Tk_real_4 = term2 + ((term1 - term2) / emissivity);
+  
+  // Back to Celsius (Fourth root)
+  float Tk_real = sqrt(sqrt(Tk_real_4));
+  return Tk_real - 273.15f;
+}
 
 void IRAM_ATTR tpo_isr() {
   uint32_t pos;
@@ -726,6 +744,8 @@ void max31855_init_pins() {
     pinMode(TC_CS_PINS[i], OUTPUT);
     digitalWrite(TC_CS_PINS[i], HIGH);
   }
+  pinMode(TC_PROBE_PIN, OUTPUT);
+  digitalWrite(TC_PROBE_PIN, HIGH);
 }
 
 void setup_encoder_fixed() {

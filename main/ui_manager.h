@@ -15,8 +15,10 @@ enum UIScreen {
   SCREEN_SETTINGS_MAX_TEMP_LOCK,
   SCREEN_SETTINGS_IDLE_OFF,
   SCREEN_SETTINGS_STARTUP,
+  SCREEN_SETTINGS_EMISSIVITY,
   SCREEN_SETTINGS_SOUND,
   SCREEN_SETTINGS_TEMP_UNIT,
+  SCREEN_SETTINGS_TC_PROBE_CAL,
   SCREEN_SETTINGS_ABOUT
 };
 
@@ -26,6 +28,7 @@ enum MenuItemPage1 {
   MENU_PAGE1_HEATER_3,
   MENU_PAGE1_MAX_TEMP_LOCK,
   MENU_PAGE1_CALIBRATION, 
+  MENU_PAGE1_EMISSIVITY,
   MENU_PAGE1_NEXT_PAGE,
   MENU_PAGE1_ITEM_COUNT 
 };
@@ -34,6 +37,7 @@ enum MenuItemPage2 {
   MENU_PAGE2_IDLE_OFF,
   MENU_PAGE2_STARTUP,  
   MENU_PAGE2_SOUND,
+  MENU_PAGE2_TC_PROBE_CAL,
   MENU_PAGE2_TEMP_UNIT,
   MENU_PAGE2_ABOUT,
   MENU_PAGE2_PREV_PAGE,
@@ -50,9 +54,8 @@ enum IdleOffMode {
 };
 
 enum StartupMode {
-  STARTUP_SAFE,      // 0: Reset Heaters to OFF
-  STARTUP_RESTORE,   // 1: Remember Checkboxes, but Stopped
-  STARTUP_AUTORUN,   // 2: Remember Checkboxes + Auto Start
+  STARTUP_OFF,
+  STARTUP_AUTORUN,  
   STARTUP_MODE_COUNT
 };
 
@@ -66,12 +69,16 @@ struct ConfigState {
   bool sound_on;
   bool heater_active[3];
   float tc_offsets[3];
+  float tc_probe_offset;
   StartupMode startup_mode;
+  float ir_emissivity[2];
 };
 
 struct AppState {
   float tc_temps[3];
+  float tc_probe_temp;
   float ir_temps[2];
+  float ir_ambient[2];
   bool is_heating_active;
   float target_temp;
   char temp_unit;
@@ -122,8 +129,10 @@ private:
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
   void drawSettingsStartup(const AppState& state, const ConfigState& config);
   void drawSettingsSound(const AppState& state, const ConfigState& config); 
+  void drawSettingsTCProbeCal(const AppState& state, const ConfigState& config);
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
+  void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
 
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
