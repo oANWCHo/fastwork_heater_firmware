@@ -675,7 +675,7 @@ void UIManager::drawSettingsAbout(const AppState& state) {
     int y_center = _spr.height() / 2 + 10;
     int y_start = y_center - (line_height * 3);
 
-    _spr.drawString("Oven Control System", _spr.width() / 2, y_start);
+    _spr.drawString("Heater Control System", _spr.width() / 2, y_start);
     _spr.drawString("Firmware v1.0", _spr.width() / 2, y_start + (line_height * 2));
     _spr.drawString("(c) 2025 K'Tor", _spr.width() / 2, y_start + (line_height * 4));
     _spr.drawString("Contact: 08x-xxx-xxxx", _spr.width() / 2, y_start + (line_height * 6));

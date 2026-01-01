@@ -15,6 +15,12 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
+// OTA
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <ElegantOTA.h>
+
 // ========== [Pin Definitions] ==========
 // #define MAXDO   13   // MISO
 // #define MAXCLK  12   // SCK
@@ -98,6 +104,13 @@ volatile int beep_mode = 0;
 uint32_t t_next_beep_action = 0;
 const int BEEP_ON_MS = 60;
 const int BEEP_OFF_MS = 100;
+
+// [OTA] WiFi Credentials
+const char* ssid = "NNTT24";
+const char* password = "TeraE-01";
+
+// [OTA] Web Server Object
+AsyncWebServer server(80);
 
 // ========== [PID Vars - UPDATED with D term] ==========
 float Kp = 1.2f, Ki = 0.02f, Kd = 0.5f;  // Added proper Kd value
@@ -721,7 +734,43 @@ void setup() {
   dataMutex = xSemaphoreCreateMutex();
   serialMutex = xSemaphoreCreateMutex();
 
-  // 2. Hardware Init
+  // 2. WiFi Setup
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(); 
+  delay(100);
+
+  WiFi.begin(ssid, password);
+  Serial.println("");
+  
+  Serial.print("Connecting to WiFi");
+  int wifi_timeout = 0;
+  
+  while (WiFi.status() != WL_CONNECTED && wifi_timeout < 40) { 
+    delay(500); 
+    Serial.print("."); 
+    wifi_timeout++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.print("Connected to ");
+    Serial.println(ssid);
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    // Start Server & OTA
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+      request->send(200, "text/plain", "Heater Control System - OTA Ready");
+    });
+  
+    ElegantOTA.begin(&server);    // Start ElegantOTA
+    server.begin();
+    Serial.println("HTTP Server Started");
+  } else {
+    Serial.println("\nWiFi Failed to connect (Skipping OTA setup)");
+  }
+
+  // 3. Hardware Init
   preferences.begin("app_config", false);
   loadConfig(config);
 
@@ -799,7 +848,7 @@ void setup() {
 
   Serial.println("Hardware initialized. Starting tasks...");
 
-  // 3. Start Tasks
+  // 4. Start Tasks
   xTaskCreatePinnedToCore(TaskControl, "Control", 4096, NULL, 3, NULL, 1);
   xTaskCreatePinnedToCore(TaskMAX, "MAX31855", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskMLX, "MLX90614", 4096, NULL, 2, NULL, 1);
@@ -808,14 +857,17 @@ void setup() {
   xTaskCreatePinnedToCore(TaskDebug, "Debug", 4096, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(TaskSound, "Sound", 2048, NULL, 1, NULL, 1);
 
-  // 4. Start TPO Interrupt
+  // 5. Start TPO Interrupt
   tpo_ticker.attach_ms(1, tpo_isr);
 
   Serial.println("FreeRTOS System Started.");
 }
 
 void loop() {
-  vTaskDelete(NULL);
+
+  ElegantOTA.loop();
+  // vTaskDelete(NULL);
+  vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 // ========== [Hardware Helper Functions] ==========
