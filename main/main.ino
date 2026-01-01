@@ -23,7 +23,7 @@
 #define MAXCS1 15  // CS1
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
-#define MAXCS4 18 // CS4
+#define MAXCS4 18  // CS4
 // #define TFT_CS  10   // Guard Pin
 
 #define ENCODER_A 6
@@ -62,7 +62,7 @@ struct SharedData {
   float ir_temps[2];
   float ir_ambient[2];
   bool heater_cutoff[3];
-  bool heater_ready[3]; // New: True if stable for 10s
+  bool heater_ready[3];  // New: True if stable for 10s
 };
 
 SharedData sysState;
@@ -99,9 +99,11 @@ uint32_t t_next_beep_action = 0;
 const int BEEP_ON_MS = 60;
 const int BEEP_OFF_MS = 100;
 
-// PID Vars
-float Kp = 1.2f, Ki = 0.02f, Kd = 0.01f;
+// ========== [PID Vars - UPDATED with D term] ==========
+float Kp = 1.2f, Ki = 0.02f, Kd = 0.5f;  // Added proper Kd value
 float pid_integral[3] = { 0.0f, 0.0f, 0.0f };
+float pid_prev_error[3] = { 0.0f, 0.0f, 0.0f };  // Previous error for D term
+uint32_t pid_last_time[3] = { 0, 0, 0 };         // Last time for dt calculation
 
 // TPO
 portMUX_TYPE tpoMux = portMUX_INITIALIZER_UNLOCKED;
@@ -135,7 +137,7 @@ void TaskMAX(void* pvParameters) {
 
   // --- [Config Moving Average] ---
   const int MA_WINDOW = 10;
-  static float ma_buffer[4][MA_WINDOW]; // Changed to 4 (0-2 for H, 3 for Probe)
+  static float ma_buffer[4][MA_WINDOW];  // Changed to 4 (0-2 for H, 3 for Probe)
   static int ma_idx[4] = { 0, 0, 0, 0 };
   static int ma_count[4] = { 0, 0, 0, 0 };
 
@@ -160,13 +162,13 @@ void TaskMAX(void* pvParameters) {
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
       digitalWrite(TFT_CS, HIGH);
       vspi->beginTransaction(maxSettings);
-      
+
       // Loop 0-2 (Heaters) + 3 (Probe)
       for (int i = 0; i < 4; i++) {
         uint32_t d = 0;
-        int cs_pin = (i < 3) ? TC_CS_PINS[i] : TC_PROBE_PIN; // Select CS
+        int cs_pin = (i < 3) ? TC_CS_PINS[i] : TC_PROBE_PIN;  // Select CS
 
-        digitalWrite(cs_pin, LOW); 
+        digitalWrite(cs_pin, LOW);
         d = vspi->transfer32(0);
         digitalWrite(cs_pin, HIGH);
 
@@ -176,8 +178,7 @@ void TaskMAX(void* pvParameters) {
 
         if (d == 0 || d == 0xFFFFFFFF) {
           is_fault = true;
-        }
-        else if (d & 0x10000) {
+        } else if (d & 0x10000) {
           if (fault_start_time[i] == 0) {
             fault_start_time[i] = millis();
           }
@@ -204,11 +205,11 @@ void TaskMAX(void* pvParameters) {
 
         if (is_fault) {
           raw_temp = NAN;
-          ma_count[i] = 0; 
+          ma_count[i] = 0;
           ma_idx[i] = 0;
         } else {
           int32_t v = (d >> 18) & 0x3FFF;
-          if (d & 0x20000000) v -= 16384; 
+          if (d & 0x20000000) v -= 16384;
           raw_temp = v * 0.25f;
         }
 
@@ -228,20 +229,20 @@ void TaskMAX(void* pvParameters) {
         // --- [Update System State] ---
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
           if (i < 3) {
-              // Heaters
-              if (isnan(final_temp)) {
-                sysState.tc_temps[i] = NAN;
-              } else {
-                sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
-              }
-              sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0;
+            // Heaters
+            if (isnan(final_temp)) {
+              sysState.tc_temps[i] = NAN;
+            } else {
+              sysState.tc_temps[i] = final_temp + config.tc_offsets[i];
+            }
+            sysState.tc_faults[i] = (is_fault) ? (d & 0x07) : 0;
           } else {
-              // Probe (Index 3)
-              if (isnan(final_temp)) {
-                sysState.tc_probe_temp = NAN;
-              } else {
-                sysState.tc_probe_temp = final_temp + config.tc_probe_offset; // Apply Probe Offset
-              }
+            // Probe (Index 3)
+            if (isnan(final_temp)) {
+              sysState.tc_probe_temp = NAN;
+            } else {
+              sysState.tc_probe_temp = final_temp + config.tc_probe_offset;  // Apply Probe Offset
+            }
           }
           xSemaphoreGive(dataMutex);
         }
@@ -262,8 +263,8 @@ void TaskMLX(void* pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   for (;;) {
-    float raw_obj[2] = {NAN, NAN};
-    float raw_amb[2] = {NAN, NAN};
+    float raw_obj[2] = { NAN, NAN };
+    float raw_amb[2] = { NAN, NAN };
 
     // Check IR1 Connection
     Wire.beginTransmission(IR1_ADDR);
@@ -283,9 +284,9 @@ void TaskMLX(void* pvParameters) {
 
     // Update Data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-      for(int i=0; i<2; i++) {
-         sysState.ir_ambient[i] = raw_amb[i]; 
-         sysState.ir_temps[i] = applyEmissivity(raw_obj[i], raw_amb[i], config.ir_emissivity[i]);
+      for (int i = 0; i < 2; i++) {
+        sysState.ir_ambient[i] = raw_amb[i];
+        sysState.ir_temps[i] = applyEmissivity(raw_obj[i], raw_amb[i], config.ir_emissivity[i]);
       }
       xSemaphoreGive(dataMutex);
     }
@@ -295,13 +296,19 @@ void TaskMLX(void* pvParameters) {
   }
 }
 
-// 3. CONTROL TASK (PID - High Priority)
-void TaskControl(void *pvParameters) {
+// 3. CONTROL TASK (PID - High Priority) - UPDATED WITH FULL PID
+void TaskControl(void* pvParameters) {
   const TickType_t xFrequency = pdMS_TO_TICKS(50);
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
-  uint32_t stable_start_time[3] = {0, 0, 0};
-  bool beep_triggered[3] = {false, false, false};
+  uint32_t stable_start_time[3] = { 0, 0, 0 };
+  bool beep_triggered[3] = { false, false, false };
+
+  // Initialize PID timing
+  for (int i = 0; i < 3; i++) {
+    pid_last_time[i] = millis();
+    pid_prev_error[i] = 0.0f;
+  }
 
   for (;;) {
     float current_temps[3];
@@ -311,7 +318,7 @@ void TaskControl(void *pvParameters) {
     // 1. Read all shared data safely
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       memcpy(current_temps, sysState.tc_temps, sizeof(current_temps));
-      for(int i=0; i<3; i++) {
+      for (int i = 0; i < 3; i++) {
         active_flags[i] = config.heater_active[i];
         cutoff_flags[i] = sysState.heater_cutoff[i];
       }
@@ -319,92 +326,132 @@ void TaskControl(void *pvParameters) {
     }
 
     for (int i = 0; i < 3; i++) {
-        
-        // --- CASE 1: Heater is OFF (Inactive) or Invalid Sensor ---
-        if (!active_flags[i] || isnan(current_temps[i])) { 
-          tpo_set_percent(i, 0);
-          stable_start_time[i] = 0;
-          
-          continue; 
-        }
 
-        // --- CASE 2: Heater is ON (Active) ---
-        if (cutoff_flags[i]) {
-            if (current_temps[i] <= config.target_temps[i]) {
-                 
-                 if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-                     
-                     sysState.heater_cutoff[i] = false; // ปลด Lock สีแดง
-                     
-                     has_go_to = false;   
-                     
+      // --- CASE 1: Heater is OFF (Inactive) or Invalid Sensor ---
+      if (!active_flags[i] || isnan(current_temps[i])) {
+        tpo_set_percent(i, 0);
+        stable_start_time[i] = 0;
+        // Reset PID state when heater is off
+        pid_integral[i] = 0.0f;
+        pid_prev_error[i] = 0.0f;
+        pid_last_time[i] = millis();
+        continue;
+      }
 
-                     xSemaphoreGive(dataMutex);
-                 }
-            }
-            
-            tpo_set_percent(i, 0); // ตัดไฟแน่นอน
-            continue; // ข้ามไปรอบหน้า (ซึ่งจะไปเข้า CASE 1 เพราะ active=false แล้ว)
-        }
-
-        // --- System Run Check ---
-        if (!has_go_to) {
-             // Active, Safe, but System Stopped -> Standby Mode
-             tpo_set_percent(i, 0);
-             stable_start_time[i] = 0;
-             beep_triggered[i] = false;
-             
-             if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-                 sysState.heater_ready[i] = false;
-                 xSemaphoreGive(dataMutex);
-             }
-             continue;
-        }
-
-        // --- Active Heating Logic ---
-
-        // 1. Overheat Check (Safety)
-        if (current_temps[i] >= config.max_temps[i]) {
-          tpo_set_percent(i, 0);
+      // --- CASE 2: Heater is LOCKED (Overheat Protection) ---
+      // FIX: Auto-unlock when temperature drops below target temp
+      if (cutoff_flags[i]) {
+        if (current_temps[i] <= config.target_temps[i]) {
+          // Temperature has cooled down below target - auto-unlock
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-             config.heater_active[i] = false; // Turn OFF
-             sysState.heater_cutoff[i] = true; // Set LOCK
-             xSemaphoreGive(dataMutex);
+            sysState.heater_cutoff[i] = false;  // Release the lock
+            // Re-enable the heater so it can resume operation
+            //  config.heater_active[i] = true;
+            has_go_to = false;
+            // Reset PID to prevent windup issues
+            pid_integral[i] = 0.0f;
+            pid_prev_error[i] = 0.0f;
+            pid_last_time[i] = millis();
+            xSemaphoreGive(dataMutex);
           }
-          beep_mode = BEEP_MODE_ALARM; 
-          beep_queue = 1; 
-          continue;
+          // Don't set has_go_to to false - let it continue running
+          // The heater will resume heating automatically
         }
 
-        // 2. PID Control
-        float err = config.target_temps[i] - current_temps[i];
-        pid_integral[i] = constrain(pid_integral[i] + err, -500, 500);
-        float u = (Kp * err) + (Ki * pid_integral[i]);
-        tpo_set_percent(i, u);
+        tpo_set_percent(i, 0);  // Keep power off while locked
+        continue;
+      }
 
-        // 3. Ready / Stability Logic
-        if (abs(err) <= 2.0f) {
-            if (stable_start_time[i] == 0) stable_start_time[i] = millis();
-            if (millis() - stable_start_time[i] > 10000) {
-                 if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-                     sysState.heater_ready[i] = true;
-                     xSemaphoreGive(dataMutex);
-                 }
-                 if (!beep_triggered[i]) {
-                     beep_mode = BEEP_MODE_READY; 
-                     beep_queue = 4;
-                     beep_triggered[i] = true;
-                 }
-            }
-        } else {
-            stable_start_time[i] = 0;
-            beep_triggered[i] = false;
-            if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-                 sysState.heater_ready[i] = false;
-                 xSemaphoreGive(dataMutex);
-            }
+      // --- System Run Check ---
+      if (!has_go_to) {
+        // Active, Safe, but System Stopped -> Standby Mode
+        tpo_set_percent(i, 0);
+        stable_start_time[i] = 0;
+        beep_triggered[i] = false;
+        // Reset PID state in standby
+        pid_integral[i] = 0.0f;
+        pid_prev_error[i] = 0.0f;
+        pid_last_time[i] = millis();
+
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+          sysState.heater_ready[i] = false;
+          xSemaphoreGive(dataMutex);
         }
-      } // End for loop
+        continue;
+      }
+
+      // --- Active Heating Logic ---
+
+      // 1. Overheat Check (Safety)
+      if (current_temps[i] >= config.max_temps[i]) {
+        tpo_set_percent(i, 0);
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          // config.heater_active[i] = false;   // Turn OFF
+          sysState.heater_cutoff[i] = true;  // Set LOCK
+          // Reset PID
+          pid_integral[i] = 0.0f;
+          pid_prev_error[i] = 0.0f;
+          xSemaphoreGive(dataMutex);
+        }
+        beep_mode = BEEP_MODE_ALARM;
+        beep_queue = 1;
+        continue;
+      }
+
+      // 2. FULL PID Control (with D term)
+      uint32_t now = millis();
+      float dt = (now - pid_last_time[i]) / 1000.0f;  // Convert to seconds
+      if (dt <= 0) dt = 0.05f;                        // Minimum dt to prevent division issues
+
+      float err = config.target_temps[i] - current_temps[i];
+
+      // P term
+      float P = Kp * err;
+
+      // I term with anti-windup
+      pid_integral[i] += err * dt;
+      pid_integral[i] = constrain(pid_integral[i], -500.0f, 500.0f);
+      float I = Ki * pid_integral[i];
+
+      // D term (derivative of error)
+      float derivative = (err - pid_prev_error[i]) / dt;
+      float D = Kd * derivative;
+
+      // Store for next iteration
+      pid_prev_error[i] = err;
+      pid_last_time[i] = now;
+
+      // Calculate total output
+      float u = P + I + D;
+
+      // Clamp output to valid range
+      u = constrain(u, 0.0f, 100.0f);
+
+      tpo_set_percent(i, u);
+
+      // 3. Ready / Stability Logic
+      if (abs(err) <= 2.0f) {
+        if (stable_start_time[i] == 0) stable_start_time[i] = millis();
+        if (millis() - stable_start_time[i] > 10000) {
+          if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+            sysState.heater_ready[i] = true;
+            xSemaphoreGive(dataMutex);
+          }
+          if (!beep_triggered[i]) {
+            beep_mode = BEEP_MODE_READY;
+            beep_queue = 4;
+            beep_triggered[i] = true;
+          }
+        }
+      } else {
+        stable_start_time[i] = 0;
+        beep_triggered[i] = false;
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+          sysState.heater_ready[i] = false;
+          xSemaphoreGive(dataMutex);
+        }
+      }
+    }  // End for loop
 
     freq_ctl_cnt++;
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -435,7 +482,7 @@ void TaskInput(void* pvParameters) {
 
     // 2. Encoder Switch (Long Press = Back, Short Click = Select)
     int curBtn = digitalRead(ENCODER_SW);
-    
+
     // --- Button State Machine ---
     if (lastBtn == HIGH && curBtn == LOW) {
       // PRESS STARTED
@@ -447,14 +494,14 @@ void TaskInput(void* pvParameters) {
         // >> LONG PRESS DETECTED (Trigger Back/Return)
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
           if (ui.getScreen() == SCREEN_STANDBY) {
-             ui.enterQuickEdit(); // Standby -> Quick Edit
+            ui.enterQuickEdit();  // Standby -> Quick Edit
           } else {
-             ui.handleButtonDoubleClick(config); // Others -> Back
+            ui.handleButtonDoubleClick(config);  // Others -> Back
           }
           xSemaphoreGive(dataMutex);
         }
-        beep_queue += 2; // Beep
-        ignore_release = true; // Flag to ignore the release action
+        beep_queue += 2;        // Beep
+        ignore_release = true;  // Flag to ignore the release action
       }
     } else if (lastBtn == LOW && curBtn == HIGH) {
       // RELEASED
@@ -464,7 +511,7 @@ void TaskInput(void* pvParameters) {
           ui.handleButtonSingleClick(config, go_to, has_go_to);
           xSemaphoreGive(dataMutex);
         }
-        beep_queue += 2; // Beep
+        beep_queue += 2;  // Beep
       }
     }
     lastBtn = curBtn;
@@ -474,47 +521,47 @@ void TaskInput(void* pvParameters) {
     if (Wire.available()) {
       uint8_t input_data = Wire.read();
       bool btn[4] = { !(input_data & 1), !(input_data & 2), !(input_data & 4), !(input_data & 8) };
-      
+
       for (int i = 0; i < 4; i++) {
         if (btn[i] && !pcf_state.btn_pressed[i]) {
           beep_queue += 2;
-          
+
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            
+
             if (i == 0) {
-               // Button 1: Toggle Settings
-               if (ui.getScreen() == SCREEN_STANDBY) {
-                   ui.openSettings(); // Open
-               } else {
-                   ui.exitSettings();
-               }
+              // Button 1: Toggle Settings
+              if (ui.getScreen() == SCREEN_STANDBY) {
+                ui.openSettings();  // Open
+              } else {
+                ui.exitSettings();
+              }
+            } else if (i == 1) {
+              if (ui.getScreen() == SCREEN_STANDBY) {  // <-- ADD THIS CHECK
+                has_go_to = !has_go_to;
+              }
             }
-            else if (i == 1) { 
-               has_go_to = !has_go_to;
-            }
-            // ปุ่ม 3, 4: ว่าง
-            
+
             saveConfig(config);
             xSemaphoreGive(dataMutex);
           }
         }
         pcf_state.btn_pressed[i] = btn[i];
       }
-      
+
       // Update LEDs
       uint8_t led_out = 0xF0;
       if (config.heater_active[0]) led_out &= ~(1 << 4);
       if (config.heater_active[1]) led_out &= ~(1 << 5);
       if (config.heater_active[2]) led_out &= ~(1 << 6);
-      
+
       // [FIXED] ใช้ตัวแปร has_go_to
-      if (has_go_to) led_out &= ~(1 << 7); // LED สถานะ Run
-      
+      if (has_go_to) led_out &= ~(1 << 7);  // LED สถานะ Run
+
       Wire.beginTransmission(PCF_ADDR);
       Wire.write(led_out | 0x0F);
       Wire.endTransmission();
     }
-    
+
     freq_input_cnt++;
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -522,7 +569,7 @@ void TaskInput(void* pvParameters) {
 
 // 5. DISPLAY TASK (Low Priority)
 void TaskDisplay(void* pvParameters) {
-  const TickType_t xFrequency = pdMS_TO_TICKS(100); // Target 100ms (10Hz)
+  const TickType_t xFrequency = pdMS_TO_TICKS(100);  // Target 100ms (10Hz)
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   for (;;) {
@@ -533,8 +580,8 @@ void TaskDisplay(void* pvParameters) {
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       // Check inactivity
       if (ui.checkInactivity(config, has_go_to, go_to)) {
-          beep_mode = 1;
-          beep_queue = 6;
+        beep_mode = 1;
+        beep_queue = 6;
       }
 
       // Copy State
@@ -542,6 +589,7 @@ void TaskDisplay(void* pvParameters) {
         st.tc_temps[i] = sysState.tc_temps[i];
         st.tc_faults[i] = sysState.tc_faults[i];
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
+        st.heater_ready[i] = sysState.heater_ready[i];
       }
       st.tc_probe_temp = sysState.tc_probe_temp;
       st.ir_temps[0] = sysState.ir_temps[0];
@@ -550,7 +598,7 @@ void TaskDisplay(void* pvParameters) {
       st.ir_ambient[1] = sysState.ir_ambient[1];
 
       if (st.ir_ambient[0] > 80.0f || st.ir_ambient[1] > 80.0f) {
-         alarm_active = true;
+        alarm_active = true;
       }
       xSemaphoreGive(dataMutex);
     }
@@ -561,18 +609,18 @@ void TaskDisplay(void* pvParameters) {
 
     // 2. Draw to Screen (Slow - SPI Bus Heavy)
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
-      ui.draw(st, config); // This takes ~50-60ms
+      ui.draw(st, config);  // This takes ~50-60ms
       xSemaphoreGive(spiMutex);
     }
 
     if (alarm_active) {
-       if (beep_queue == 0) beep_queue = 2;
+      if (beep_queue == 0) beep_queue = 2;
     }
 
     freq_disp_cnt++;
 
     // FIX: Use vTaskDelayUntil to ensure fixed 10Hz regardless of draw time
-    vTaskDelayUntil(&xLastWakeTime, xFrequency); 
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
 
@@ -600,8 +648,8 @@ void TaskDebug(void* pvParameters) {
       Serial.println("--- [Module Data Log] ---");
       if (xSemaphoreTake(dataMutex, 100) == pdTRUE) {
         Serial.printf("  TC1: %.2f | TC2: %.2f | TC3: %.2f\n", sysState.tc_temps[0], sysState.tc_temps[1], sysState.tc_temps[2]);
-        Serial.printf("  IR1: Obj %.2f / Amb %.2f | IR2: Obj %.2f / Amb %.2f\n", 
-                      sysState.ir_temps[0], sysState.ir_ambient[0], 
+        Serial.printf("  IR1: Obj %.2f / Amb %.2f | IR2: Obj %.2f / Amb %.2f\n",
+                      sysState.ir_temps[0], sysState.ir_ambient[0],
                       sysState.ir_temps[1], sysState.ir_ambient[1]);
         Serial.printf("  Target: %.2f | Active: %s\n", go_to, has_go_to ? "YES" : "NO");
         xSemaphoreGive(dataMutex);
@@ -620,19 +668,18 @@ void TaskSound(void* pvParameters) {
   for (;;) {
     // If we have beeps in the queue
     if (beep_queue > 0) {
-      
+
       int on_time = 60;
       int off_time = 100;
 
       // --- NEW LOGIC START ---
-      if (beep_mode == 1) { 
+      if (beep_mode == 1) {
         // Sleep Mode (Slow pulsing)
-        on_time = 250; 
+        on_time = 250;
         off_time = 250;
-      } 
-      else if (beep_mode == 3) { 
+      } else if (beep_mode == 3) {
         // ALARM Mode (Overheat) - Long 5 second beep
-        on_time = 5000; 
+        on_time = 5000;
         off_time = 100;
       }
       // Mode 2 (Ready) uses default fast beeps, which is fine
@@ -640,9 +687,9 @@ void TaskSound(void* pvParameters) {
 
       // Perform Beep
       if (config.sound_on) {
-          digitalWrite(BUZZER, HIGH);
+        digitalWrite(BUZZER, HIGH);
       }
-      
+
       // Blocking delay is safe here (Task has its own stack)
       vTaskDelay(pdMS_TO_TICKS(on_time));
 
@@ -655,7 +702,7 @@ void TaskSound(void* pvParameters) {
 
       // Reset mode if done
       if (beep_queue == 0) beep_mode = 0;
-      
+
     } else {
       // No beeps needed, sleep to save CPU
       vTaskDelay(pdMS_TO_TICKS(100));
@@ -677,45 +724,47 @@ void setup() {
   // 2. Hardware Init
   preferences.begin("app_config", false);
   loadConfig(config);
-  
-  if (config.max_temp_lock == 0.0f) {
-      Serial.println("Config Invalid (Zeros). Loading Defaults...");
-      
-      config.max_temp_lock = 400.0f; // Allow up to 400C by default
-      config.temp_unit = 'C';
-      config.idle_off_mode = IDLE_OFF_30_MIN;
-      config.startup_mode = STARTUP_OFF;
-      config.sound_on = true;
-      config.ir_emissivity[0] = 1.0f;
-      config.ir_emissivity[1] = 1.0f;
-      config.tc_probe_offset = 0.0f;
 
-      for(int i=0; i<3; i++) {
-         config.target_temps[i] = 200.0f;  // Safe default
-         config.max_temps[i] = 250.0f;    // Safe default
-         config.tc_offsets[i] = 0.0f;
-         config.heater_active[i] = false;
-      }
-      saveConfig(config); // Save these defaults so they persist
+  if (config.max_temp_lock == 0.0f) {
+    Serial.println("Config Invalid (Zeros). Loading Defaults...");
+
+    config.max_temp_lock = 400.0f;  // Allow up to 400C by default
+    config.temp_unit = 'C';
+    config.idle_off_mode = IDLE_OFF_30_MIN;
+    config.startup_mode = STARTUP_OFF;
+    config.sound_on = true;
+    config.ir_emissivity[0] = 1.0f;
+    config.ir_emissivity[1] = 1.0f;
+    config.tc_probe_offset = 0.0f;
+
+    for (int i = 0; i < 3; i++) {
+      config.target_temps[i] = 200.0f;  // Safe default
+      config.max_temps[i] = 250.0f;     // Safe default
+      config.tc_offsets[i] = 0.0f;
+      config.heater_active[i] = false;
+    }
+    saveConfig(config);  // Save these defaults so they persist
   }
 
 
   if (config.startup_mode == STARTUP_OFF) {
     // Mode 1: Restore Selection, but stay STOPPED
     // (This matches standard behavior, no change needed)
-    has_go_to = false; 
+    has_go_to = false;
   }
 
   if (config.startup_mode == STARTUP_AUTORUN) {
-     bool any_active = false;
-     for(int i=0; i<3; i++) { if(config.heater_active[i]) any_active = true; }
-     if (any_active) {
-       has_go_to = true; 
-     } else {
-       has_go_to = false;
-     }
+    bool any_active = false;
+    for (int i = 0; i < 3; i++) {
+      if (config.heater_active[i]) any_active = true;
+    }
+    if (any_active) {
+      has_go_to = true;
+    } else {
+      has_go_to = false;
+    }
   } else {
-     has_go_to = false; 
+    has_go_to = false;
   }
 
   pinMode(SSR_PIN1, OUTPUT);
@@ -774,7 +823,7 @@ void loop() {
 // Stefan-Boltzmann Law: T_obj^4 = T_amb^4 + (T_sensor^4 - T_amb^4) / emissivity
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity) {
   if (isnan(t_obj_sensor) || isnan(t_amb)) return NAN;
-  if (emissivity >= 0.99f) return t_obj_sensor; // Optimization for 1.0
+  if (emissivity >= 0.99f) return t_obj_sensor;  // Optimization for 1.0
 
   // Convert to Kelvin
   float Tk_obj = t_obj_sensor + 273.15f;
@@ -785,7 +834,7 @@ float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity) {
 
   // Correction
   float Tk_real_4 = term2 + ((term1 - term2) / emissivity);
-  
+
   // Back to Celsius (Fourth root)
   float Tk_real = sqrt(sqrt(Tk_real_4));
   return Tk_real - 273.15f;

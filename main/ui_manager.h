@@ -27,6 +27,7 @@ enum MenuItemPage1 {
   MENU_PAGE1_MAX_TEMP_LOCK,
   MENU_PAGE1_CALIBRATION, 
   MENU_PAGE1_EMISSIVITY,
+  MENU_PAGE1_TC_PROBE_CAL, 
   MENU_PAGE1_NEXT_PAGE,
   MENU_PAGE1_ITEM_COUNT 
 };
@@ -35,7 +36,6 @@ enum MenuItemPage2 {
   MENU_PAGE2_IDLE_OFF,
   MENU_PAGE2_STARTUP,  
   MENU_PAGE2_SOUND,
-  MENU_PAGE2_TC_PROBE_CAL,
   MENU_PAGE2_TEMP_UNIT,
   MENU_PAGE2_ABOUT,
   MENU_PAGE2_PREV_PAGE,
@@ -100,7 +100,6 @@ public:
   void draw(const AppState& state, const ConfigState& config);
   
   bool handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to);
-  
   bool handleButtonDoubleClick(ConfigState& config);
   bool handleEncoderRotation(float steps, ConfigState& config);
 
@@ -108,10 +107,9 @@ public:
   void resetInactivityTimer();
 
   void openSettings();
-
-  void exitSettings();           // Called by Button 1 to close settings
-  void enterQuickEdit();         // Called by Long Press in Main
-  UIScreen getScreen() const { return _current_screen; } // To check state in Main
+  void exitSettings();           
+  void enterQuickEdit();         
+  UIScreen getScreen() const { return _current_screen; } 
 
 private:
   TFT_eSPI* _tft;
@@ -120,6 +118,7 @@ private:
   QuickEditStep _quick_edit_step;
 
   bool _blink_state;
+  bool _is_editing_calibration;
   int _selected_menu_item; 
   int _selected_menu_item_page_2; 
   float _menu_step_accumulator;
@@ -136,7 +135,7 @@ private:
   void drawSettingsHeaterTargetTemp(const AppState& state);
   void drawSettingsHeaterMaxTemp(const AppState& state);
   void drawSettingsHeaterCalibrate(const AppState& state);
-  void drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config); // <-- ADDED
+  void drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config); 
   void drawSettingsMaxTempLock(const AppState& state);
   void drawSettingsIdleOff(const AppState& state, const ConfigState& config);
   void drawSettingsStartup(const AppState& state, const ConfigState& config);
@@ -145,10 +144,13 @@ private:
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
-  void drawTaskBar();
   
+  void drawTaskBar();
+  void drawHeader(const char* title); 
+
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
+  float convertDelta(float temp_c, char unit); // <-- NEW Helper
 
   uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 };
