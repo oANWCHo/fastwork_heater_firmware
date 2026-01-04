@@ -5,7 +5,9 @@
 
 enum UIScreen {
   SCREEN_STANDBY,
+  SCREEN_AUTO_MODE,
   SCREEN_QUICK_EDIT,
+  SCREEN_QUICK_EDIT_AUTO,
   SCREEN_SLEEP,
   SCREEN_SETTINGS_PAGE_1, 
   SCREEN_SETTINGS_PAGE_2, 
@@ -61,6 +63,8 @@ struct ConfigState {
   float target_temps[3];
   float max_temps[3];
   float max_temp_lock;
+  float auto_target_temps[3]; 
+  float auto_max_temps[3];
   char temp_unit;
   IdleOffMode idle_off_mode;
   bool light_on;
@@ -83,6 +87,11 @@ struct AppState {
   uint8_t tc_faults[3];
   bool heater_cutoff_state[3];
   bool heater_ready[3];
+  uint8_t auto_step;
+  bool auto_mode_enabled;        
+  bool auto_running_background;  
+  bool manual_running_background; 
+  bool manual_was_started;
 };
 
 enum QuickEditStep {
@@ -108,13 +117,17 @@ public:
 
   void openSettings();
   void exitSettings();           
-  void enterQuickEdit();         
+  void enterQuickEdit();
+  void enterQuickEditAuto();
+  void switchToAutoMode();
+  void switchToStandby();  // เพิ่ม: บังคับกลับ Standby Mode
   UIScreen getScreen() const { return _current_screen; } 
 
 private:
   TFT_eSPI* _tft;
   TFT_eSprite _spr;
   UIScreen _current_screen;
+  UIScreen _previous_screen;  // จำหน้าก่อน Settings
   QuickEditStep _quick_edit_step;
 
   bool _blink_state;
@@ -125,6 +138,8 @@ private:
   float _temp_edit_value;
   
   int _standby_selection;
+  int _auto_selection;
+  
   uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
@@ -144,7 +159,8 @@ private:
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
-  
+  void drawAutoModeScreen(const AppState& state, const ConfigState& config);
+
   void drawTaskBar();
   void drawHeader(const char* title); 
 
