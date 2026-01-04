@@ -79,6 +79,7 @@ struct ConfigState {
 struct AppState {
   float tc_temps[3];
   float tc_probe_temp;
+  float tc_probe_peak;
   float ir_temps[2];
   float ir_ambient[2];
   bool is_heating_active;

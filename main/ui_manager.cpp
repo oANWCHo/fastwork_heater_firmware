@@ -1284,21 +1284,40 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
   _spr.unloadFont();
 
-  int tc_x = gap + sensor_w + gap;
-  _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
-  
-  _spr.loadFont(Arial18);
-  _spr.setTextColor(C_BLACK, C_LIME_BG);
-  _spr.setTextDatum(MC_DATUM);
-  
-  if (isnan(state.tc_probe_temp)) {
-    snprintf(ir_buf, 30, "TC Wire : ---%c", state.temp_unit);
-  } else {
-    float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
-    snprintf(ir_buf, 30, "TC Wire : %.1f%c", wire_t, state.temp_unit);
-  }
-  _spr.drawString(ir_buf, tc_x + (sensor_w/2), sensor_y + (sensor_h/2));
-  _spr.unloadFont();
+  int tc_x = gap + sensor_w + gap; // (หรือใช้ logic เดิมในฟังก์ชันนั้น)
+    _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
+    
+    _spr.loadFont(Arial18);
+    _spr.setTextColor(C_BLACK, C_LIME_BG);
+    
+    char wire_buf[40];
+    int center_x = tc_x + (sensor_w/2);
+    int center_y = sensor_y + (sensor_h/2);
+
+    // บรรทัดที่ 1: ค่าปัจจุบัน (แสดงด้านบนของกึ่งกลางเล็กน้อย)
+    if (isnan(state.tc_probe_temp)) {
+      snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit);
+    } else {
+      float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
+      snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit);
+    }
+    _spr.setTextDatum(BC_DATUM); // Bottom-Center (วางเหนือจุดกึ่งกลาง)
+    _spr.drawString(wire_buf, center_x, center_y - 2);
+
+    // บรรทัดที่ 2: ค่า Max 5s (แสดงด้านล่างของกึ่งกลาง)
+    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) {
+       snprintf(wire_buf, 40, "Max(5s): ---");
+    } else {
+       float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit);
+       snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit);
+    }
+    
+    _spr.setTextDatum(TC_DATUM); // Top-Center (วางใต้จุดกึ่งกลาง)
+    // เปลี่ยนฟอนต์ให้เล็กลงนิดหน่อยสำหรับบรรทัดล่าง หรือใช้ Arial18 เหมือนเดิมก็ได้
+    // กรณีนี้ใช้ Arial18 แต่อาจจะล้นถ้ากล่องเล็ก ลองดูผลลัพธ์ครับ
+    _spr.drawString(wire_buf, center_x, center_y + 2);
+    
+    _spr.unloadFont();
 }
 
 void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& config) {
@@ -1496,20 +1515,37 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.unloadFont();
 
     // Right Box (TC Wire) - Lime Background
-    int tc_x = gap + sensor_w + gap;
+    int tc_x = gap + sensor_w + gap; // (หรือใช้ logic เดิมในฟังก์ชันนั้น)
     _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
     
     _spr.loadFont(Arial18);
     _spr.setTextColor(C_BLACK, C_LIME_BG);
-    _spr.setTextDatum(MC_DATUM);
     
+    char wire_buf[40];
+    int center_x = tc_x + (sensor_w/2);
+    int center_y = sensor_y + (sensor_h/2);
+
     if (isnan(state.tc_probe_temp)) {
-      snprintf(ir_buf, 30, "TC Wire : ---%c", state.temp_unit);
+      snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit);
     } else {
       float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
-      snprintf(ir_buf, 30, "TC Wire : %.1f%c", wire_t, state.temp_unit);
+      snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit);
     }
-    // ตำแหน่งเดียวกับ Standby: Center box
-    _spr.drawString(ir_buf, tc_x + (sensor_w/2), sensor_y + (sensor_h/2));
+    _spr.setTextDatum(BC_DATUM); // Bottom-Center (วางเหนือจุดกึ่งกลาง)
+    _spr.drawString(wire_buf, center_x, center_y - 2);
+
+    // บรรทัดที่ 2: ค่า Max 5s (แสดงด้านล่างของกึ่งกลาง)
+    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) {
+       snprintf(wire_buf, 40, "Max(5s): ---");
+    } else {
+       float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit);
+       snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit);
+    }
+    
+    _spr.setTextDatum(TC_DATUM); // Top-Center (วางใต้จุดกึ่งกลาง)
+    // เปลี่ยนฟอนต์ให้เล็กลงนิดหน่อยสำหรับบรรทัดล่าง หรือใช้ Arial18 เหมือนเดิมก็ได้
+    // กรณีนี้ใช้ Arial18 แต่อาจจะล้นถ้ากล่องเล็ก ลองดูผลลัพธ์ครับ
+    _spr.drawString(wire_buf, center_x, center_y + 2);
+    
     _spr.unloadFont();
 }

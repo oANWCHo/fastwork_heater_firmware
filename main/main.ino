@@ -84,6 +84,7 @@ struct SharedData {
   float tc_temps[3];
   float displayed_temps[3];
   float tc_probe_temp;
+  float tc_probe_peak;
   float cj_temps[3];
   uint8_t tc_faults[3];
   float ir_temps[2];
@@ -338,11 +339,15 @@ void TaskControl(void* pvParameters) {
   static uint32_t cycle_change_debounce = 0;
   static uint32_t snapshot_timer[3] = { 0, 0, 0 };
   static float last_displayed_val[3] = { 0, 0, 0 };
-  
+
+  static float wire_max_tracker = -999.0f;
+  static uint32_t wire_max_timer = 0;
+  static float wire_max_display = 0.0f;
   for (;;) {
     float current_temps[3];
     float ir1_temp = NAN;
-    
+    float current_wire_temp = NAN;
+
     // Create local flags to ensure thread-safety
     bool local_auto_started = false;
     bool local_manual_started = false;
@@ -351,7 +356,7 @@ void TaskControl(void* pvParameters) {
       for (int i = 0; i < 3; i++) current_temps[i] = sysState.tc_temps[i];
       ir1_temp = sysState.ir_temps[0];  // Get IR1 for Auto mode control
       current_auto_step = sysState.auto_step;
-      
+      current_wire_temp = sysState.tc_probe_temp;
       // Capture State Flags inside Mutex
       local_auto_started = sysState.auto_was_started;
       local_manual_started = sysState.manual_was_started;
@@ -359,6 +364,23 @@ void TaskControl(void* pvParameters) {
       xSemaphoreGive(dataMutex);
     }
 
+    if (!isnan(current_wire_temp)) {
+        if (current_wire_temp > wire_max_tracker) {
+            wire_max_tracker = current_wire_temp;
+        }
+    }
+    
+    if (millis() - wire_max_timer > 5000) {
+        wire_max_display = wire_max_tracker;
+        wire_max_tracker = -999.0f; // Reset ค่า tracker
+        wire_max_timer = millis();  // เริ่มนับ 5 วิใหม่
+        
+        // อัปเดตค่าเข้า Shared Memory
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+            sysState.tc_probe_peak = wire_max_display;
+            xSemaphoreGive(dataMutex);
+        }
+    }
     // Check if Auto mode is running (Processing a step)
     bool auto_is_running = (local_auto_started && current_auto_step > 0);
     
@@ -727,6 +749,7 @@ void TaskDisplay(void* pvParameters) {
   for (;;) {
     AppState st;
     bool alarm_active = false;
+    bool lock_active = false; // <--- เพิ่มตัวแปรเช็ค Lock Mode
 
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       if (ui.checkInactivity(config, has_go_to, go_to)) {
@@ -737,26 +760,29 @@ void TaskDisplay(void* pvParameters) {
       for (int i = 0; i < 3; i++) {
         st.tc_temps[i] = sysState.displayed_temps[i];
         st.tc_faults[i] = sysState.tc_faults[i];
+        
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
+        // เช็คว่า Heater ตัวนี้ Lock (Cutoff) อยู่หรือไม่?
+        if (st.heater_cutoff_state[i]) {
+            lock_active = true; 
+        }
+
         st.heater_ready[i] = sysState.heater_ready[i];
       }
       st.auto_step = sysState.auto_step;
       st.auto_mode_enabled = sysState.auto_mode_enabled;
       
-      // Check if Auto is running in background (for Standby page display)
       st.auto_running_background = (has_go_to && !sysState.auto_mode_enabled && sysState.auto_was_started);
-      
-      // Check if Manual is running in background (for Auto page display)
       st.manual_running_background = (has_go_to && sysState.auto_mode_enabled && sysState.manual_was_started);
-      
       st.manual_was_started = sysState.manual_was_started;
-      
+
       st.tc_probe_temp = sysState.tc_probe_temp;
+      st.tc_probe_peak = sysState.tc_probe_peak;  // Add peak temp for display
       st.ir_temps[0] = sysState.ir_temps[0];
       st.ir_temps[1] = sysState.ir_temps[1];
       st.ir_ambient[0] = sysState.ir_ambient[0];
       st.ir_ambient[1] = sysState.ir_ambient[1];
-
+      
       if (st.ir_ambient[0] > 80.0f || st.ir_ambient[1] > 80.0f) {
         alarm_active = true;
       }
@@ -766,14 +792,21 @@ void TaskDisplay(void* pvParameters) {
     st.is_heating_active = has_go_to;
     st.target_temp = go_to;
     st.temp_unit = config.temp_unit;
-
     if (xSemaphoreTake(spiMutex, portMAX_DELAY) == pdTRUE) {
       ui.draw(st, config);
       xSemaphoreGive(spiMutex);
     }
 
-    if (alarm_active) {
-      if (beep_queue == 0) beep_queue = 2;
+    // === Logic สั่ง Buzzer ===
+    if (lock_active) {
+       // ถ้ามี Heater Lock ให้ร้องยาวแบบ Mode 3
+       beep_mode = 3;
+       if (beep_queue == 0) beep_queue = 2;
+    } 
+    else if (alarm_active) {
+       // ถ้า Ambient ร้อนเกิน ให้ร้องสั้นแบบปกติ (Mode 0)
+       // (ถ้า lock_active ทำงานอยู่ จะ override อันนี้ไปเลย ซึ่งถูกต้องแล้ว เพราะ Lock สำคัญกว่า)
+       if (beep_queue == 0) beep_queue = 2;
     }
 
     freq_disp_cnt++;
@@ -832,7 +865,7 @@ void TaskSound(void* pvParameters) {
         on_time = 250;
         off_time = 250;
       } else if (beep_mode == 3) {
-        on_time = 5000;
+        on_time = 3000;
         off_time = 100;
       }
 
