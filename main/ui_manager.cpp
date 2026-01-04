@@ -1305,13 +1305,14 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     // ---------------------------------------------------------
     // 1. Taskbar + Header Section
     // ---------------------------------------------------------
-    drawTaskBar(); // Add taskbar at the top
+    drawTaskBar(); 
     
     int w = _spr.width();
-    int header_y = 24; // Start below taskbar
+    int h = _spr.height();
+    int header_y = 24; 
     int header_h = 30;
     
-    _spr.fillRect(0, header_y, w, header_h, C_BLACK); // Header BG
+    _spr.fillRect(0, header_y, w, header_h, C_BLACK); 
     
     _spr.loadFont(Arial18);
     _spr.setTextColor(TFT_WHITE, C_BLACK);
@@ -1320,7 +1321,6 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
 
     _spr.setTextDatum(MR_DATUM);
     char buf[40];
-    // แสดงค่า IR1 แทน TC
     float ir1_temp = state.ir_temps[0];
     if (isnan(ir1_temp)) {
         snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit);
@@ -1332,147 +1332,130 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.unloadFont();
 
     // ---------------------------------------------------------
-    // 2. Cycle Boxes (Cycle 1, 2, 3)
+    // 2. Layout Calculation (Align with Standby Screen)
     // ---------------------------------------------------------
-    int gap = 4;
-    int box_w = (w - (4 * gap)) / 3;
-    int box_h = 120;
-    int start_y = header_y + header_h + 5; // Start below header
+    // ใช้ค่า Gap และ Logic การคำนวณเดียวกับหน้า Standby เพื่อให้ตรงกันเป๊ะ
+    int gap = 6; 
+    
+    // คำนวณตำแหน่ง Y เริ่มต้นของ Sensor ให้ตรงกับหน้า Standby (194px)
+    // (Standby: Top(24) + Gap(6) + HeaterH(158) + Gap(6) = 194)
+    int sensor_y = 24 + 6 + 158 + 6; 
+    int sensor_h = h - sensor_y - gap;
+    int sensor_w = (w - (3 * gap)) / 2;
 
-    for (int i = 0; i < 3; i++) { // Loop 0-2 (Cycle 1-3)
-        int x = gap + (i * (box_w + gap));
+    // คำนวณพื้นที่เหลือสำหรับ Cycle Boxes ด้านบน
+    int cycle_start_y = header_y + header_h + gap; // 24 + 30 + 6 = 60
+    int cycle_box_h = sensor_y - gap - cycle_start_y; // คำนวณความสูงให้เต็มพื้นที่พอดี
+    int cycle_box_w = (w - (4 * gap)) / 3;
+
+    // ---------------------------------------------------------
+    // 3. Cycle Boxes (Cycle 1, 2, 3)
+    // ---------------------------------------------------------
+    for (int i = 0; i < 3; i++) { 
+        int x = gap + (i * (cycle_box_w + gap));
         
-        // --- Determine Cycle State ---
-        // Per Diagram: Check if Manual/Standby is running in background
         bool isManualRunningInBackground = state.manual_running_background;
-        
         bool isThisCycleActive = (state.auto_step == (i + 1));
         bool globalRun = state.is_heating_active;
-        bool isLocked = state.heater_cutoff_state[1]; // Main heater (index 1)
-        bool isReady = state.heater_ready[1];          // Main heater (index 1)
+        bool isLocked = state.heater_cutoff_state[1]; 
+        bool isReady = state.heater_ready[1];          
         
-        // --- Selection & Background Logic ---
         bool isSelected = (_auto_selection == i);
         uint16_t bg_color = TFT_WHITE;
         
-        // Per Diagram: If Manual is running in background -> Grey out ALL cycles
         if (isManualRunningInBackground) {
-            bg_color = C_GREY_BG;  // Grey out
+            bg_color = C_GREY_BG;  
         }
-        // ถ้ากำลัง Edit ช่องนี้อยู่ ให้กระพริบพื้นหลัง (Blink)
         else {
             bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_AUTO && isSelected);
             if (isEditingThis) {
                 bg_color = _blink_state ? TFT_WHITE : C_GREY_BG; 
             } 
-            // Priority 2: Active Cycle (Running) -> ใช้สีเขียวเข้ม (Darker Lime) เป็นพื้นหลัง
             else if (isThisCycleActive && globalRun) {
                  bg_color = C_ACTIVE_CYCLE_BG; 
             }
-            // Priority 3: Normal
             else {
                  bg_color = TFT_WHITE; 
             }
         }
 
-        _spr.fillRect(x, start_y, box_w, box_h, bg_color);
+        _spr.fillRect(x, cycle_start_y, cycle_box_w, cycle_box_h, bg_color);
 
-        // --- Border Logic ---
-        // Active Cycle gets RED Border
         if (isSelected) {
-             _spr.drawRect(x, start_y, box_w, box_h, TFT_RED);
-             _spr.drawRect(x+1, start_y+1, box_w-2, box_h-2, TFT_RED);
+             _spr.drawRect(x, cycle_start_y, cycle_box_w, cycle_box_h, TFT_RED);
+             _spr.drawRect(x+1, cycle_start_y+1, cycle_box_w-2, cycle_box_h-2, TFT_RED);
         } else {
-             _spr.drawRect(x, start_y, box_w, box_h, TFT_BLACK);
+             _spr.drawRect(x, cycle_start_y, cycle_box_w, cycle_box_h, TFT_BLACK);
         }
 
-        // --- Cycle Title ---
+        // --- Cycle Content ---
         _spr.loadFont(Arial18);
         _spr.setTextColor(C_BLACK, bg_color);
         _spr.setTextDatum(TC_DATUM);
         snprintf(buf, 20, "Cycle %d", i+1);
-        _spr.drawString(buf, x + (box_w/2), start_y + 5); 
-        _spr.drawFastHLine(x+5, start_y + 28, box_w-10, C_BLACK);
+        _spr.drawString(buf, x + (cycle_box_w/2), cycle_start_y + 8); 
+        _spr.drawFastHLine(x+5, cycle_start_y + 32, cycle_box_w-10, C_BLACK);
 
-        // --- Display Values (SET & MAX) ---
         float t_set = convertTemp(config.auto_target_temps[i], state.temp_unit);
         float t_max = convertTemp(config.auto_max_temps[i], state.temp_unit);
 
-        // -- SET Line --
+        // Positioning offsets (Adjusted for taller box)
+        int set_y_label = cycle_start_y + 38;
+        int set_y_val   = set_y_label + 14;
+        int status_y_label = set_y_val + 24;
+        int status_y_val   = status_y_label + 20;
+
         _spr.loadFont(Arial12);
         _spr.setTextColor(C_BLACK, bg_color);
-        _spr.drawString("SET", x + (box_w/2), start_y + 32);
+        _spr.drawString("SET", x + (cycle_box_w/2), set_y_label);
 
         _spr.loadFont(Arial18);
         bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_AUTO && isSelected);
-        // ถ้ากำลังแก้ค่า SET ให้ตัวเลขเป็นสีแดง
         uint16_t val_col = (isEditingThis && _quick_edit_step == Q_EDIT_TARGET) ? C_RED_TXT : C_BLACK;
         _spr.setTextColor(val_col, bg_color);
-        snprintf(buf, 20, "%.1f%c", t_set, state.temp_unit);  // เปลี่ยนเป็น .1f
-        _spr.drawString(buf, x + (box_w/2), start_y + 45);
+        snprintf(buf, 20, "%.1f%c", t_set, state.temp_unit);
+        _spr.drawString(buf, x + (cycle_box_w/2), set_y_val);
 
-        // -- MAX Line (Show in QuickEdit mode, Status in normal mode) --
         _spr.loadFont(Arial12);
         _spr.setTextColor(C_BLACK, bg_color);
         _spr.setTextDatum(TC_DATUM);
         
         if (isEditingThis) {
-            // In QuickEdit mode: Show MAX label and value
-            _spr.drawString("MAX", x + (box_w/2), start_y + 65);
-            
+            _spr.drawString("MAX", x + (cycle_box_w/2), status_y_label);
             _spr.loadFont(Arial18);
-            // ถ้ากำลังแก้ค่า MAX ให้ตัวเลขเป็นสีแดง
             val_col = (_quick_edit_step == Q_EDIT_MAX) ? C_RED_TXT : C_BLACK;
             _spr.setTextColor(val_col, bg_color);
-            snprintf(buf, 20, "%.1f%c", t_max, state.temp_unit);  // เปลี่ยนเป็น .1f
-            _spr.drawString(buf, x + (box_w/2), start_y + 85);
+            snprintf(buf, 20, "%.1f%c", t_max, state.temp_unit);
+            _spr.drawString(buf, x + (cycle_box_w/2), status_y_val);
         } else {
-            // Normal mode: Show Status label and state
-            _spr.drawString("Status", x + (box_w/2), start_y + 65);
-            
+            _spr.drawString("Status", x + (cycle_box_w/2), status_y_label);
             _spr.loadFont(Arial18);
             
-            // Per Diagram: If Manual running in background -> show "In-use"
             if (isManualRunningInBackground) {
                 _spr.setTextColor(C_GREY_TXT, bg_color);
-                _spr.drawString("In-use", x + (box_w/2), start_y + 85);
+                _spr.drawString("In-use", x + (cycle_box_w/2), status_y_val);
             }
-            // State Logic (same as standby mode)
             else if (isLocked) {
-                // Lock state - blink red
                 uint16_t lock_color = _blink_state ? C_RED_TXT : bg_color; 
                 _spr.setTextColor(lock_color, bg_color);
-                _spr.drawString("Lock", x + (box_w/2), start_y + 85);
+                _spr.drawString("Lock", x + (cycle_box_w/2), status_y_val);
             } 
-            else if (!isThisCycleActive) {
-                // Not the active cycle - show Standby
+            else if (!isThisCycleActive || !globalRun) {
                 _spr.setTextColor(TFT_BLUE, bg_color); 
-                _spr.drawString("Standby", x + (box_w/2), start_y + 85);
-            }
-            else if (!globalRun) {
-                // Active cycle but not running - show Standby
-                _spr.setTextColor(TFT_BLUE, bg_color); 
-                _spr.drawString("Standby", x + (box_w/2), start_y + 85);
+                _spr.drawString("Standby", x + (cycle_box_w/2), status_y_val);
             } 
             else {
-                // Active cycle and running - check if heating or ready
                 if (isReady) {
                     _spr.setTextColor(C_GREEN_TXT, bg_color); 
-                    _spr.drawString("Ready", x + (box_w/2), start_y + 85);
+                    _spr.drawString("Ready", x + (cycle_box_w/2), status_y_val);
                 } else {
-                    int badge_w = 80;   // ความกว้างกล่อง
-                    int badge_h = 26;   // ความสูงกล่อง
-                    int center_x = x + (box_w / 2);
-                    int pos_y = start_y + 85; // ตำแหน่ง Y เดิม
-
-                    // 1. วาดกล่องสี่เหลี่ยมสีขาว (จัดกึ่งกลางแนวนอน)
-                    _spr.fillRect(center_x - (badge_w / 2), pos_y, badge_w, badge_h, TFT_WHITE);
-                    
-                    // 2. วาดตัวหนังสือ "Heating" ตรงกลางกล่อง
-                    _spr.setTextDatum(MC_DATUM); // เปลี่ยนจุดอ้างอิงเป็น Middle-Center ชั่วคราว
+                    int badge_w = 80;
+                    int badge_h = 26;
+                    int center_x = x + (cycle_box_w / 2);
+                    _spr.fillRect(center_x - (badge_w / 2), status_y_val, badge_w, badge_h, TFT_WHITE);
+                    _spr.setTextDatum(MC_DATUM); 
                     _spr.setTextColor(TFT_ORANGE, bg_color); 
-                    _spr.drawString("Heating", center_x, pos_y + (badge_h / 2));
-                    
+                    _spr.drawString("Heating", center_x, status_y_val + (badge_h / 2));
                     _spr.setTextDatum(TC_DATUM);
                 }
             }
@@ -1481,40 +1464,52 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     }
 
     // ---------------------------------------------------------
-    // 3. Bottom Sensors (IR1, IR2, TC Wire)
+    // 4. Bottom Sensors (IR1, IR2, TC Wire) - EXACT MATCH STANDBY
     // ---------------------------------------------------------
-    int bot_y = start_y + box_h + 5;
-    int bot_h = _spr.height() - bot_y - 5;
-    int sens_w = (w - (3 * gap)) / 2;
-
     // Left Box (IR) - Pink Background
-    _spr.fillRect(gap, bot_y, sens_w, bot_h, C_PINK_BG);
+    _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
     _spr.loadFont(Arial18);
     _spr.setTextColor(C_BLACK, C_PINK_BG);
     _spr.setTextDatum(ML_DATUM);
     
+    char ir_buf[30];
+
     // IR1
-    float ir1 = convertTemp(state.ir_temps[0], state.temp_unit);
-    if(isnan(state.ir_temps[0])) snprintf(buf, 40, "IR1 : ---");
-    else snprintf(buf, 40, "IR1 : %.1f%c", ir1, state.temp_unit);
-    _spr.drawString(buf, gap + 10, bot_y + (bot_h/4));
+    if (isnan(state.ir_temps[0])) {
+      snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit);
+    } else {
+      float ir1 = convertTemp(state.ir_temps[0], state.temp_unit);
+      snprintf(ir_buf, 30, "IR1 : %.1f%c", ir1, state.temp_unit);
+    }
+    // ตำแหน่งเดียวกับ Standby: sensor_y + (sensor_h/4) + 2
+    _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
 
     // IR2
-    float ir2 = convertTemp(state.ir_temps[1], state.temp_unit);
-    if(isnan(state.ir_temps[1])) snprintf(buf, 40, "IR2 : ---");
-    else snprintf(buf, 40, "IR2 : %.1f%c", ir2, state.temp_unit);
-    _spr.drawString(buf, gap + 10, bot_y + (bot_h*3/4));
+    if (isnan(state.ir_temps[1])) {
+      snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit);
+    } else {
+      float ir2 = convertTemp(state.ir_temps[1], state.temp_unit);
+      snprintf(ir_buf, 30, "IR2 : %.1f%c", ir2, state.temp_unit);
+    }
+    // ตำแหน่งเดียวกับ Standby: sensor_y + (sensor_h*3/4) - 1
+    _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
+    _spr.unloadFont();
 
     // Right Box (TC Wire) - Lime Background
-    int tc_x = gap + sens_w + gap;
-    _spr.fillRect(tc_x, bot_y, sens_w, bot_h, C_LIME_BG);
+    int tc_x = gap + sensor_w + gap;
+    _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
+    
+    _spr.loadFont(Arial18);
     _spr.setTextColor(C_BLACK, C_LIME_BG);
     _spr.setTextDatum(MC_DATUM);
     
-    float wire = convertTemp(state.tc_probe_temp, state.temp_unit);
-    if(isnan(state.tc_probe_temp)) snprintf(buf, 40, "TC Wire : ---");
-    else snprintf(buf, 40, "TC Wire : %.1f%c", wire, state.temp_unit);
-    _spr.drawString(buf, tc_x + (sens_w/2), bot_y + (bot_h/2));
-    
+    if (isnan(state.tc_probe_temp)) {
+      snprintf(ir_buf, 30, "TC Wire : ---%c", state.temp_unit);
+    } else {
+      float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
+      snprintf(ir_buf, 30, "TC Wire : %.1f%c", wire_t, state.temp_unit);
+    }
+    // ตำแหน่งเดียวกับ Standby: Center box
+    _spr.drawString(ir_buf, tc_x + (sensor_w/2), sensor_y + (sensor_h/2));
     _spr.unloadFont();
 }
