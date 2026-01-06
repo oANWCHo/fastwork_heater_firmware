@@ -13,6 +13,7 @@ enum UIScreen {
   SCREEN_SLEEP,
   SCREEN_SETTINGS_PAGE_1, 
   SCREEN_SETTINGS_PAGE_2, 
+  SCREEN_SETTINGS_PAGE_3,           // NEW: Page 3 for WiFi Settings
   SCREEN_SETTINGS_HEATER_TARGET_TEMP,
   SCREEN_SETTINGS_HEATER_MAX_TEMP,
   SCREEN_SETTINGS_HEATER_CALIBRATE, 
@@ -24,7 +25,11 @@ enum UIScreen {
   SCREEN_SETTINGS_SOUND,
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_TC_PROBE_CAL,
-  SCREEN_SETTINGS_ABOUT
+  SCREEN_SETTINGS_ABOUT,
+  SCREEN_SETTINGS_WIFI_MENU,        // NEW: WiFi sub-menu
+  SCREEN_SETTINGS_WIFI_SSID,        // NEW: SSID entry screen
+  SCREEN_SETTINGS_WIFI_PASSWORD,    // NEW: Password entry screen
+  SCREEN_SETTINGS_WIFI_STATUS       // NEW: WiFi status/info screen
 };
 
 enum MenuItemPage1 {
@@ -42,8 +47,25 @@ enum MenuItemPage2 {
   MENU_PAGE2_SOUND,
   MENU_PAGE2_TEMP_UNIT,
   MENU_PAGE2_ABOUT,
-  MENU_PAGE2_PREV_PAGE,
+  MENU_PAGE2_NEXT_PAGE,   // Changed from PREV to NEXT
   MENU_PAGE2_ITEM_COUNT
+};
+
+// NEW: Page 3 menu items
+enum MenuItemPage3 {
+  MENU_PAGE3_WIFI_SETTINGS,
+  MENU_PAGE3_PREV_PAGE,
+  MENU_PAGE3_ITEM_COUNT
+};
+
+// NEW: WiFi menu items
+enum WiFiMenuItem {
+  WIFI_MENU_SSID,
+  WIFI_MENU_PASSWORD,
+  WIFI_MENU_STATUS,
+  WIFI_MENU_CONNECT,
+  WIFI_MENU_BACK,
+  WIFI_MENU_ITEM_COUNT
 };
 
 enum IdleOffMode {
@@ -59,6 +81,16 @@ enum StartupMode {
   STARTUP_OFF,
   STARTUP_AUTORUN,  
   STARTUP_MODE_COUNT
+};
+
+// NEW: WiFi configuration structure
+#define WIFI_SSID_MAX_LEN 32
+#define WIFI_PASS_MAX_LEN 64
+
+struct WiFiConfig {
+  char ssid[WIFI_SSID_MAX_LEN + 1];
+  char password[WIFI_PASS_MAX_LEN + 1];
+  bool use_custom;  // true = use custom settings, false = use hardcoded
 };
 
 struct ConfigState {
@@ -78,6 +110,7 @@ struct ConfigState {
   float tc_probe_offset;
   StartupMode startup_mode;
   float ir_emissivity[2];
+  WiFiConfig wifi_config;  // NEW: WiFi settings
 };
 
 struct AppState {
@@ -100,6 +133,7 @@ struct AppState {
   bool manual_preset_running;     
   bool manual_was_started;
   uint8_t manual_preset_index;
+  char ip_address[20];
 };
 
 enum QuickEditStep {
@@ -108,6 +142,7 @@ enum QuickEditStep {
 };
 
 typedef void (*ConfigSaveCallback)(const ConfigState& config);
+typedef void (*WiFiReconnectCallback)();  // NEW: Callback to trigger WiFi reconnection
 
 class UIManager {
 public:
@@ -130,40 +165,59 @@ public:
   void enterQuickEditManual();
   void switchToAutoMode();
   void switchToManualMode();
-  void switchToStandby();  // เพิ่ม: บังคับกลับ Standby Mode
+  void switchToStandby();
   UIScreen getScreen() const { return _current_screen; } 
 
   int getManualSelection() const { return _manual_selection; }
   int getManualConfirmedPreset() const { return _manual_confirmed_preset; }
   void setManualConfirmedPreset(int preset) { _manual_confirmed_preset = preset; }
 
+  // NEW: WiFi callback setter
+  void setWiFiReconnectCallback(WiFiReconnectCallback callback) { _wifi_reconnect_callback = callback; }
+
 private:
   TFT_eSPI* _tft;
   TFT_eSprite _spr;
   UIScreen _current_screen;
-  UIScreen _previous_screen;  // จำหน้าก่อน Settings
+  UIScreen _previous_screen;
   QuickEditStep _quick_edit_step;
 
   bool _blink_state;
   bool _is_editing_calibration;
   int _selected_menu_item; 
   int _selected_menu_item_page_2; 
+  int _selected_menu_item_page_3;   // NEW: Page 3 selection
+  int _selected_wifi_menu_item;      // NEW: WiFi menu selection
   float _menu_step_accumulator;
   float _temp_edit_value;
   
   int _standby_selection;
   int _auto_selection;
-  int _manual_selection;           // Current cursor position (red border)
-  int _manual_confirmed_preset;    // Which preset is actually confirmed/selected (0-2)
-  bool _show_warning;              // Warning icon state for TaskBar
+  int _manual_selection;
+  int _manual_confirmed_preset;
+  bool _show_warning;
   
   uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
+  WiFiReconnectCallback _wifi_reconnect_callback;  // NEW
+
+  // NEW: Character entry variables
+  char _char_entry_buffer[WIFI_PASS_MAX_LEN + 1];  // Temporary buffer for entry
+  int _char_entry_cursor;                           // Current cursor position
+  int _char_entry_char_index;                       // Current character index in charset
+  int _char_entry_max_len;                          // Maximum length for current field
+  bool _char_entry_editing;                         // true = editing character, false = moving cursor
+
+  // Character set for WiFi entry (printable ASCII)
+  static const char* getCharset();
+  static int getCharsetLength();
+  int findCharInCharset(char c);
 
   void drawStandbyScreen(const AppState& state, const ConfigState& config);
   void drawSettingsPage1(const AppState& state, const ConfigState& config); 
   void drawSettingsPage2(const AppState& state, const ConfigState& config); 
+  void drawSettingsPage3(const AppState& state, const ConfigState& config);   // NEW
   void drawSettingsHeaterTargetTemp(const AppState& state);
   void drawSettingsHeaterMaxTemp(const AppState& state);
   void drawSettingsHeaterCalibrate(const AppState& state);
@@ -179,12 +233,19 @@ private:
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
   void drawManualModeScreen(const AppState& state, const ConfigState& config);
 
+  // NEW: WiFi settings screens
+  void drawSettingsWiFiMenu(const AppState& state, const ConfigState& config);
+  void drawSettingsWiFiSSID(const AppState& state, const ConfigState& config);
+  void drawSettingsWiFiPassword(const AppState& state, const ConfigState& config);
+  void drawSettingsWiFiStatus(const AppState& state, const ConfigState& config);
+  void drawCharEntryScreen(const char* title, bool is_password);
+
   void drawTaskBar();
   void drawHeader(const char* title); 
 
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
-  float convertDelta(float temp_c, char unit); // <-- NEW Helper
+  float convertDelta(float temp_c, char unit);
 
   uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 };

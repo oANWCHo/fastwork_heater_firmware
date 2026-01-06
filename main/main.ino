@@ -175,6 +175,29 @@ void tpo_set_percent(int index, float percent);
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity, float sensor_emissivity = 0.95f);
 void setupWebServer(); 
 
+// Add specific helper functions
+const char* getWiFiSSID() {
+  if (config.wifi_config.use_custom && strlen(config.wifi_config.ssid) > 0) {
+    return config.wifi_config.ssid;
+  }
+  return "NNTT24";  // Default fallback
+}
+
+const char* getWiFiPassword() {
+  if (config.wifi_config.use_custom && strlen(config.wifi_config.password) > 0) {
+    return config.wifi_config.password;
+  }
+  return "TeraE-01";  // Default fallback
+}
+
+void triggerWiFiReconnect() {
+  Serial.println("[WiFi] Manual reconnect triggered");
+  WiFi.disconnect();
+  vTaskDelay(pdMS_TO_TICKS(500));
+  WiFi.begin(getWiFiSSID(), getWiFiPassword());
+  wifiStatus = WIFI_STATUS_CONNECTING;
+}
+
 // ========== [Tasks] ==========
 
 // 0. WiFi Manager Task (Core 0, Non-Blocking)
@@ -187,18 +210,19 @@ void TaskWiFiManager(void* pvParameters) {
   WiFi.setAutoReconnect(true);
   
   Serial.println("[WiFi] Starting initial connection attempt...");
-  WiFi.begin(ssid, password);
+  // WiFi.begin(ssid, password);
+  WiFi.begin(getWiFiSSID(), getWiFiPassword());
   wifiStatus = WIFI_STATUS_CONNECTING;
   
   for (;;) {
     wl_status_t currentStatus = WiFi.status();
     switch (currentStatus) {
       case WL_CONNECTED:
+        wifiStatus = WIFI_STATUS_CONNECTED;
         if (!wasConnected) {
           Serial.println("\n[WiFi] Connected!");
           Serial.print("[WiFi] IP Address: ");
           Serial.println(WiFi.localIP());
-          wifiStatus = WIFI_STATUS_CONNECTED;
           wifiSignalStrength = WiFi.RSSI();
           if (!serverStarted) {
             setupWebServer();
@@ -235,7 +259,8 @@ void TaskWiFiManager(void* pvParameters) {
           Serial.println("[WiFi] Network not found, retrying...");
           WiFi.disconnect();
           vTaskDelay(pdMS_TO_TICKS(100));
-          WiFi.begin(ssid, password);
+          // WiFi.begin(ssid, password);
+          WiFi.begin(getWiFiSSID(), getWiFiPassword());
           lastReconnectAttempt = millis();
         }
         break;
@@ -793,6 +818,14 @@ void TaskDisplay(void* pvParameters) {
       xSemaphoreGive(dataMutex);
     }
 
+    if (getWiFiStatus() == WIFI_STATUS_CONNECTED) {
+       String ip = WiFi.localIP().toString();
+       strncpy(st.ip_address, ip.c_str(), 19);
+       st.ip_address[19] = '\0';
+    } else {
+       strcpy(st.ip_address, "---");
+    }
+
     st.is_heating_active = has_go_to;
     st.target_temp = go_to;
     st.temp_unit = config.temp_unit;
@@ -922,11 +955,11 @@ void setup() {
 
   if (config.auto_target_temps[0] == 0.0f) {
     for (int i = 0; i < 3; i++) {
-      config.auto_target_temps[i] = 200.0f;
+      config.auto_target_temps[i] = 100.0f;
       config.auto_max_temps[i] = 250.0f;
     }
     for (int i = 0; i < 4; i++) {
-      config.manual_target_temps[i] = 200.0f;
+      config.manual_target_temps[i] = 100.0f;
       config.manual_max_temps[i] = 250.0f;
     }
     saveConfig(config);
@@ -988,7 +1021,7 @@ void setup() {
   tft.setRotation(3);
   tft.fillScreen(TFT_BLACK);
   ui.begin();
-
+  ui.setWiFiReconnectCallback(triggerWiFiReconnect);
   Serial.println("Hardware initialized. Starting tasks...");
 
   // Core 0: WiFi
@@ -1176,4 +1209,9 @@ void saveConfig(const ConfigState& cfg) {
 void loadConfig(ConfigState& cfg) {
   if (preferences.getBytesLength("config") == sizeof(cfg))
     preferences.getBytes("config", &cfg, sizeof(cfg));
+
+  if (cfg.wifi_config.ssid[0] == 0xFF) { 
+   memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
+   cfg.wifi_config.use_custom = false;
+}
 }
