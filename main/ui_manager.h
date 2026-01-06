@@ -155,6 +155,7 @@ private:
   int _auto_selection;
   int _manual_selection;           // Current cursor position (red border)
   int _manual_confirmed_preset;    // Which preset is actually confirmed/selected (0-2)
+  bool _show_warning;              // Warning icon state for TaskBar
   
   uint32_t _last_activity_time;
 

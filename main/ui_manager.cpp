@@ -3,6 +3,15 @@
 #include "Arial18.h" 
 #include "Arial12.h"
 
+#include "taskbar_icons.h"
+
+// WiFi Status enum (must match main.ino)
+enum WiFiConnectionStatus {
+  WIFI_STATUS_DISCONNECTED = 0,
+  WIFI_STATUS_CONNECTING,
+  WIFI_STATUS_CONNECTED
+};
+
 // --- Theme Color Definitions ---
 #define COLOR_IDLE   0x39E7 // Dark Grey
 #define COLOR_ACTIVE 0x05E0 // Dark Green
@@ -24,6 +33,9 @@
 #define C_GREEN_TXT 0x4D6A 
 #define C_BLACK     0x0000
 #define C_GREY_TXT  0x7BEF 
+
+extern WiFiConnectionStatus getWiFiStatus();
+extern int getWiFiSignalStrength();
 
 const uint32_t INACTIVITY_TIMEOUT_MS = 10000;
 
@@ -94,7 +106,8 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback)
   _standby_selection = 0;
   _auto_selection = 0;
   _manual_selection = 0;
-  _manual_confirmed_preset = 0;  // Default: Preset 1 (index 0) is confirmed
+  _manual_confirmed_preset = 0;
+  _show_warning = false;  // Warning icon state
 }
 
 void UIManager::begin() {
@@ -186,6 +199,31 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     last_blink_time = millis();
   }
 
+  // Update warning state for TaskBar
+  // Show warning when: any heater in Lock mode OR IR internal temp > 80°C
+  _show_warning = false;
+  
+  // Check for Lock mode (heater_cutoff_state)
+  for (int i = 0; i < 3; i++) {
+    if (state.heater_cutoff_state[i]) {
+      _show_warning = true;
+      break;
+    }
+  }
+  
+  // Check IR internal temperature > 80°C
+  if (!_show_warning) {
+    for (int i = 0; i < 2; i++) {
+      if (!isnan(state.ir_ambient[i]) && state.ir_ambient[i] > 80.0f) {
+        _show_warning = true;
+        break;
+      }
+    }
+  }
+  
+  // DEBUG: Uncomment the line below to test warning icon display
+  // _show_warning = true;
+
   _spr.fillSprite(C_BLACK);
 
   switch (_current_screen) {
@@ -230,23 +268,75 @@ void UIManager::drawTaskBar() {
     _spr.fillRect(0, 0, w, h, C_BLACK);
     _spr.drawFastHLine(0, h-1, w, TFT_DARKGREY);
 
-    int icon_x = w - 25;
-    int icon_y = h / 2;
+    int icon_spacing = 4;
+    int right_margin = 6;
     
-    _spr.drawCircle(icon_x, icon_y, 8, TFT_DARKGREY);
-    _spr.drawLine(icon_x, icon_y-3, icon_x, icon_y+2, TFT_DARKGREY);
-    _spr.drawPixel(icon_x, icon_y+5, TFT_DARKGREY);
+    // === Layout: [Title] ... [Warning] [BT] [WiFi] ===
+    // Calculate positions from right to left
     
-    icon_x -= 25;
-    _spr.drawString("BT", icon_x, icon_y, 1);
-
-    icon_x -= 25;
-    _spr.drawCircle(icon_x, icon_y+4, 2, TFT_DARKGREY);
-    _spr.drawArc(icon_x, icon_y+4, 6, 8, 220, 320, TFT_DARKGREY, C_BLACK);
+    // --- WiFi Icon (rightmost) ---
+    int wifi_x = w - right_margin - WIFI_ICON_WIDTH;
+    int wifi_y = (h - WIFI_ICON_HEIGHT) / 2;
     
+    WiFiConnectionStatus wifi_status = getWiFiStatus();
+    int rssi = getWiFiSignalStrength();
+    
+    const unsigned char* wifi_icon = nullptr;
+    uint16_t wifi_color = TFT_DARKGREY;
+    
+    switch (wifi_status) {
+        case WIFI_STATUS_CONNECTED:
+            if (rssi > -50) {
+                wifi_icon = wifi_connected;
+                wifi_color = TFT_GREEN;
+            } else if (rssi > -70) {
+                wifi_icon = wifi_signal_3;
+                wifi_color = TFT_GREEN;
+            } else if (rssi > -80) {
+                wifi_icon = wifi_signal_2;
+                wifi_color = TFT_YELLOW;
+            } else {
+                wifi_icon = wifi_signal_1;
+                wifi_color = TFT_ORANGE;
+            }
+            break;
+            
+        case WIFI_STATUS_CONNECTING:
+            wifi_icon = _blink_state ? wifi_connecting_1 : wifi_connecting_2;
+            wifi_color = TFT_CYAN;
+            break;
+            
+        case WIFI_STATUS_DISCONNECTED:
+        default:
+            wifi_icon = wifi_disconnected;
+            wifi_color = TFT_RED;
+            break;
+    }
+    
+    if (wifi_icon != nullptr) {
+        _spr.drawXBitmap(wifi_x, wifi_y, wifi_icon, WIFI_ICON_WIDTH, WIFI_ICON_HEIGHT, wifi_color);
+    }
+    
+    // --- Bluetooth Icon (left of WiFi) - Mockup, always grey ---
+    int bt_x = wifi_x - icon_spacing - BT_ICON_WIDTH;
+    int bt_y = (h - BT_ICON_HEIGHT) / 2;
+    _spr.drawXBitmap(bt_x, bt_y, bt_icon, BT_ICON_WIDTH, BT_ICON_HEIGHT, TFT_DARKGREY);
+    
+    // --- Warning Icon (left of BT) ---
+    // Show when: any heater in Lock mode OR IR internal temp > 80°C
+    // Uses cached state from draw() call
+    if (_show_warning) {
+        int warn_x = bt_x - icon_spacing - WARNING_ICON_WIDTH;
+        int warn_y = (h - WARNING_ICON_HEIGHT) / 2;
+        // Blinking warning icon
+        uint16_t warn_color = _blink_state ? TFT_YELLOW : TFT_ORANGE;
+        _spr.drawXBitmap(warn_x, warn_y, warning_icon, WARNING_ICON_WIDTH, WARNING_ICON_HEIGHT, warn_color);
+    }
+    
+    // === Title (leftmost) ===
     _spr.setTextColor(TFT_LIGHTGREY, C_BLACK);
     _spr.setTextDatum(ML_DATUM);
-    _spr.drawString("Smart Heater", 5, icon_y);
+    _spr.drawString("Smart Heater", 5, h / 2);
 }
 
 void UIManager::drawHeader(const char* title) {
