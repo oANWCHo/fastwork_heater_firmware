@@ -62,8 +62,16 @@ const char* standby_button_labels[6] = {
 };
 
 void UIManager::switchToAutoMode() {
-    _previous_screen = SCREEN_AUTO_MODE;  // บันทึกว่าอยู่ Auto Mode
+    _previous_screen = SCREEN_AUTO_MODE;  
     _current_screen = SCREEN_AUTO_MODE;
+    resetInactivityTimer();
+}
+
+void UIManager::switchToManualMode() {
+    _previous_screen = SCREEN_MANUAL_MODE;
+    _current_screen = SCREEN_MANUAL_MODE;
+    // Reset cursor to confirmed preset position
+    _manual_selection = _manual_confirmed_preset;
     resetInactivityTimer();
 }
 
@@ -76,7 +84,7 @@ void UIManager::switchToStandby() {
 UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback) 
   : _tft(tft), _spr(_tft), _save_callback(save_callback) {
   _current_screen = SCREEN_STANDBY;
-  _previous_screen = SCREEN_STANDBY;  // เริ่มต้นที่ Standby
+  _previous_screen = SCREEN_STANDBY; 
   _quick_edit_step = Q_EDIT_TARGET;
   _blink_state = false;
   _is_editing_calibration = false; 
@@ -85,6 +93,8 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback)
   _menu_step_accumulator = 0.0f;
   _standby_selection = 0;
   _auto_selection = 0;
+  _manual_selection = 0;
+  _manual_confirmed_preset = 0;  // Default: Preset 1 (index 0) is confirmed
 }
 
 void UIManager::begin() {
@@ -127,6 +137,15 @@ void UIManager::enterQuickEditAuto() {
     if (_auto_selection >= 0 && _auto_selection <= 2) {
         _current_screen = SCREEN_QUICK_EDIT_AUTO;
         _quick_edit_step = Q_EDIT_TARGET; // เริ่มแก้ที่ Target ก่อน
+        _menu_step_accumulator = 0.0f;
+        resetInactivityTimer();
+    }
+}
+
+void UIManager::enterQuickEditManual() {
+    if (_manual_selection >= 0 && _manual_selection <= 3) {  // 4 presets (0-3)
+        _current_screen = SCREEN_QUICK_EDIT_MANUAL;
+        _quick_edit_step = Q_EDIT_TARGET;
         _menu_step_accumulator = 0.0f;
         resetInactivityTimer();
     }
@@ -181,6 +200,8 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
 
     case SCREEN_STANDBY:                  drawStandbyScreen(state, config); break;
     case SCREEN_AUTO_MODE:        drawAutoModeScreen(state, config); break;
+    case SCREEN_MANUAL_MODE:      drawManualModeScreen(state, config); break; 
+    case SCREEN_QUICK_EDIT_MANUAL: drawManualModeScreen(state, config); break;
     case SCREEN_QUICK_EDIT:               drawStandbyScreen(state, config); break;
     case SCREEN_QUICK_EDIT_AUTO:  drawAutoModeScreen(state, config); break;
     case SCREEN_SETTINGS_PAGE_1:          drawSettingsPage1(state, config); break; 
@@ -756,6 +777,18 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
             _current_screen = SCREEN_AUTO_MODE;
         }
         return true;
+    case SCREEN_MANUAL_MODE:
+        // Click encoder to confirm the current cursor position as selected preset
+        _manual_confirmed_preset = _manual_selection;
+        return true;
+    case SCREEN_QUICK_EDIT_MANUAL:
+        if (_quick_edit_step == Q_EDIT_TARGET) {
+            _quick_edit_step = Q_EDIT_MAX; 
+        } else {
+            if (_save_callback) _save_callback(config);
+            _current_screen = SCREEN_MANUAL_MODE;
+        }
+        return true;
     case SCREEN_SETTINGS_PAGE_1: 
       switch (_selected_menu_item) {
         case MENU_PAGE1_MAX_TEMP_LOCK: 
@@ -869,6 +902,10 @@ bool UIManager::handleButtonDoubleClick(ConfigState& config) {
     resetInactivityTimer();
     return true; 
   }
+  if (_current_screen == SCREEN_MANUAL_MODE) {
+       enterQuickEditManual();
+       return true;
+  }
   resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_SETTINGS_PAGE_1: case SCREEN_SETTINGS_PAGE_2: _current_screen = SCREEN_STANDBY; break;
@@ -918,6 +955,13 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       _auto_selection = new_pos;
       break;
     }
+    case SCREEN_MANUAL_MODE: {
+      int new_pos = _manual_selection + change;
+      if (new_pos < 0) new_pos = 0;
+      if (new_pos > 3) new_pos = 3;  // 4 presets (0-3)
+      _manual_selection = new_pos;
+      break;
+    }
     case SCREEN_QUICK_EDIT: {
         int heaterIdx = _standby_selection;
         if (_quick_edit_step == Q_EDIT_TARGET) {
@@ -950,6 +994,22 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
                 config.auto_max_temps[cycleIdx] = config.auto_target_temps[cycleIdx];
             if (config.auto_max_temps[cycleIdx] > config.max_temp_lock) 
                 config.auto_max_temps[cycleIdx] = config.max_temp_lock;
+        }
+        break;
+    }
+    case SCREEN_QUICK_EDIT_MANUAL: {
+        int presetIdx = _manual_selection;
+        if (_quick_edit_step == Q_EDIT_TARGET) {
+            config.manual_target_temps[presetIdx] += (float)change * 0.5f;
+            if (config.manual_target_temps[presetIdx] < 0) config.manual_target_temps[presetIdx] = 0;
+            if (config.manual_target_temps[presetIdx] > config.max_temp_lock) 
+                config.manual_target_temps[presetIdx] = config.max_temp_lock;
+        } else {
+            config.manual_max_temps[presetIdx] += (float)change * 0.5f;
+            if (config.manual_max_temps[presetIdx] < config.manual_target_temps[presetIdx]) 
+                config.manual_max_temps[presetIdx] = config.manual_target_temps[presetIdx];
+            if (config.manual_max_temps[presetIdx] > config.max_temp_lock) 
+                config.manual_max_temps[presetIdx] = config.max_temp_lock;
         }
         break;
     }
@@ -1084,7 +1144,6 @@ uint16_t UIManager::getStatusColor(bool is_active, float current_temp, float tar
 }
 
 void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& config) {
-  
   drawTaskBar();
 
   int top_offset = 24; 
@@ -1107,13 +1166,13 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
       bool isLocked = state.heater_cutoff_state[i];
       bool globalRun = state.is_heating_active;
       
-      // Per Diagram: Only grey out Main Heater (index 1) when Auto is actually running in background
-      bool isMainHeaterInAutoRunning = (i == 1) && state.auto_running_background;
+      // Check if THIS heater is controlled by another mode
+      // เฉพาะ Main Heater (index 1) เท่านั้นที่จะถูกยึดโดย Auto หรือ Manual Preset
+      bool isControlledByOther = (i == 1) && (state.auto_running_background || state.manual_preset_running);
 
-      // Per Diagram: If Auto is running in background, grey out main_index heater
       uint16_t bg_color;
-      if (isMainHeaterInAutoRunning) {
-          bg_color = C_GREY_BG;  // Grey out - Auto is using this heater
+      if (isControlledByOther) {
+          bg_color = C_GREY_BG; // Grey out เฉพาะตัวที่โดนยึด
       } else {
           bg_color = (isActive || isLocked) ? C_WHITE : C_GREY_BG;
       }
@@ -1142,6 +1201,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
       int section_gap = 42;
 
       if (isEditingThis) {
+          // ... (ส่วนแสดง Quick Edit คงเดิม) ...
           _spr.unloadFont(); _spr.loadFont(Arial12); 
           _spr.setTextColor(C_BLACK, bg_color);
           _spr.drawString("SET", center_x, start_y);
@@ -1193,6 +1253,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
           _spr.drawString("SET", center_x, set_y);
           
           _spr.unloadFont(); _spr.loadFont(Arial18);
+
           float t_set = convertTemp(config.target_temps[i], state.temp_unit);
           snprintf(buf, 20, "%.1f%c", t_set, state.temp_unit);
           _spr.setTextColor(C_BLACK, bg_color);
@@ -1205,17 +1266,13 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
 
           _spr.unloadFont(); _spr.loadFont(Arial18);
           
-          // Per Diagram: Check if this is Main Heater (index 1) and Auto is running in background
-          bool isMainHeaterInAuto = (i == 1) && state.auto_running_background;
-          
           if (isLocked) {
               uint16_t lock_color = _blink_state ? C_RED_TXT : bg_color; 
               _spr.setTextColor(lock_color, bg_color);
               _spr.drawString("Lock", center_x, status_y + val_offset);
           } 
-          else if (isMainHeaterInAuto) {
-              // Per Diagram: Main Heater when Auto is running in background
-              // Grey out and show "In-use"
+          else if (isControlledByOther) {
+              // Main Heater (P2) ถูกยึด
               _spr.setTextColor(C_GREY_TXT, bg_color);
               _spr.drawString("In-use", center_x, status_y + val_offset);
           }
@@ -1224,22 +1281,21 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
               _spr.drawString("OFF", center_x, status_y + val_offset);
           }
           else {
-              // เช็คว่าควรแสดง Standby หรือไม่
-              // 1. ถ้า Global Run ไม่ทำงาน (ปกติ)
-              // 2. หรือถ้า Auto ทำงานอยู่ (background) -> Heater 1,3 ต้องเป็น Standby (เพราะ Auto คุมอยู่)
-              bool force_standby = false;
-              if (i != 1 && state.auto_running_background) {
-                  force_standby = true;
+              // --- แก้ไข LOGIC ตรงนี้ ---
+              // เช็คว่า Standby (Manual Basic) ถูกสั่ง Start หรือไม่?
+              // ถ้า Global Run (has_go_to) ทำงานเพราะ Auto แต่ Standby ไม่ได้ Start -> ต้องขึ้น Standby
+              
+              bool isRunning = false;
+              if (globalRun) {
+                  // ถ้า Global Run จริง ต้องดูว่าใครเป็นคนสั่ง
+                  // สำหรับ H1, H3: ต้องดู manual_was_started เท่านั้น
+                  // สำหรับ H2: ถ้า Auto ไม่ได้ยึด (check isControlledByOther ไปแล้ว) ก็ดู manual_was_started
+                  if (state.manual_was_started) {
+                      isRunning = true;
+                  }
               }
 
-              if (!globalRun || force_standby) {
-                  _spr.setTextColor(TFT_BLUE, bg_color); 
-                  _spr.drawString("Standby", center_x, status_y + val_offset);
-              } 
-              else {
-                  // แสดง Heating/Ready เมื่อ:
-                  // 1. Global Run ทำงาน
-                  // 2. และไม่ใช่เงื่อนไข force_standby ข้างบน
+              if (isRunning) {
                   if (state.heater_ready[i]) {
                       _spr.setTextColor(C_GREEN_TXT, bg_color); 
                       _spr.drawString("Ready", center_x, status_y + val_offset);
@@ -1247,6 +1303,10 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
                       _spr.setTextColor(TFT_ORANGE, bg_color); 
                       _spr.drawString("Heating", center_x, status_y + val_offset);
                   }
+              } else {
+                  // Standby Mode (Active but not Running)
+                  _spr.setTextColor(TFT_BLUE, bg_color); 
+                  _spr.drawString("Standby", center_x, status_y + val_offset);
               }
           }
       } 
@@ -1259,71 +1319,33 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
           _spr.drawRect(x, y, heater_w, heater_h, C_BLACK);
       }
   }
-
+  
   _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
   _spr.loadFont(Arial18);
   _spr.setTextColor(C_BLACK, C_PINK_BG);
   _spr.setTextDatum(ML_DATUM);
   
   char ir_buf[30];
-  
-  if (isnan(state.ir_temps[0])) {
-    snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit);
-  } else {
-    float ir1 = convertTemp(state.ir_temps[0], state.temp_unit);
-    snprintf(ir_buf, 30, "IR1 : %.1f%c", ir1, state.temp_unit);
-  }
+  if (isnan(state.ir_temps[0])) { snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); } else { float ir1 = convertTemp(state.ir_temps[0], state.temp_unit); snprintf(ir_buf, 30, "IR1 : %.1f%c", ir1, state.temp_unit); }
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
-
-  if (isnan(state.ir_temps[1])) {
-    snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit);
-  } else {
-    float ir2 = convertTemp(state.ir_temps[1], state.temp_unit);
-    snprintf(ir_buf, 30, "IR2 : %.1f%c", ir2, state.temp_unit);
-  }
+  if (isnan(state.ir_temps[1])) { snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); } else { float ir2 = convertTemp(state.ir_temps[1], state.temp_unit); snprintf(ir_buf, 30, "IR2 : %.1f%c", ir2, state.temp_unit); }
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
   _spr.unloadFont();
-
-  int tc_x = gap + sensor_w + gap; // (หรือใช้ logic เดิมในฟังก์ชันนั้น)
-    _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
-    
-    _spr.loadFont(Arial18);
-    _spr.setTextColor(C_BLACK, C_LIME_BG);
-    
-    char wire_buf[40];
-    int center_x = tc_x + (sensor_w/2);
-    int center_y = sensor_y + (sensor_h/2);
-
-    // บรรทัดที่ 1: ค่าปัจจุบัน (แสดงด้านบนของกึ่งกลางเล็กน้อย)
-    if (isnan(state.tc_probe_temp)) {
-      snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit);
-    } else {
-      float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
-      snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit);
-    }
-    _spr.setTextDatum(BC_DATUM); // Bottom-Center (วางเหนือจุดกึ่งกลาง)
-    _spr.drawString(wire_buf, center_x, center_y - 2);
-
-    // บรรทัดที่ 2: ค่า Max 5s (แสดงด้านล่างของกึ่งกลาง)
-    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) {
-       snprintf(wire_buf, 40, "Max(5s): ---");
-    } else {
-       float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit);
-       snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit);
-    }
-    
-    _spr.setTextDatum(TC_DATUM); // Top-Center (วางใต้จุดกึ่งกลาง)
-    // เปลี่ยนฟอนต์ให้เล็กลงนิดหน่อยสำหรับบรรทัดล่าง หรือใช้ Arial18 เหมือนเดิมก็ได้
-    // กรณีนี้ใช้ Arial18 แต่อาจจะล้นถ้ากล่องเล็ก ลองดูผลลัพธ์ครับ
-    _spr.drawString(wire_buf, center_x, center_y + 2);
-    
-    _spr.unloadFont();
+  int tc_x = gap + sensor_w + gap;
+  _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
+  _spr.loadFont(Arial18);
+  _spr.setTextColor(C_BLACK, C_LIME_BG);
+  char wire_buf[40];
+  int center_x = tc_x + (sensor_w/2);
+  int center_y = sensor_y + (sensor_h/2);
+  if (isnan(state.tc_probe_temp)) { snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); } else { float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit); snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit); }
+  _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
+  if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) { snprintf(wire_buf, 40, "Max(5s): ---"); } else { float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit); snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit); }
+  _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2);
+  _spr.unloadFont();
 }
 
 void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& config) {
-    // ---------------------------------------------------------
-    // 1. Taskbar + Header Section
-    // ---------------------------------------------------------
     drawTaskBar(); 
     
     int w = _spr.width();
@@ -1350,30 +1372,27 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.drawString(buf, w - 5, header_y + 15);
     _spr.unloadFont();
 
-    // ---------------------------------------------------------
-    // 2. Layout Calculation (Align with Standby Screen)
-    // ---------------------------------------------------------
-    // ใช้ค่า Gap และ Logic การคำนวณเดียวกับหน้า Standby เพื่อให้ตรงกันเป๊ะ
     int gap = 6; 
-    
-    // คำนวณตำแหน่ง Y เริ่มต้นของ Sensor ให้ตรงกับหน้า Standby (194px)
-    // (Standby: Top(24) + Gap(6) + HeaterH(158) + Gap(6) = 194)
     int sensor_y = 24 + 6 + 158 + 6; 
     int sensor_h = h - sensor_y - gap;
     int sensor_w = (w - (3 * gap)) / 2;
 
-    // คำนวณพื้นที่เหลือสำหรับ Cycle Boxes ด้านบน
-    int cycle_start_y = header_y + header_h + gap; // 24 + 30 + 6 = 60
-    int cycle_box_h = sensor_y - gap - cycle_start_y; // คำนวณความสูงให้เต็มพื้นที่พอดี
+    int cycle_start_y = header_y + header_h + gap; 
+    int cycle_box_h = sensor_y - gap - cycle_start_y; 
     int cycle_box_w = (w - (4 * gap)) / 3;
 
-    // ---------------------------------------------------------
-    // 3. Cycle Boxes (Cycle 1, 2, 3)
-    // ---------------------------------------------------------
     for (int i = 0; i < 3; i++) { 
         int x = gap + (i * (cycle_box_w + gap));
         
-        bool isManualRunningInBackground = state.manual_running_background;
+        // --- แก้ไข LOGIC ตรงนี้ ---
+        bool standbyUsingMain = state.manual_running_background && config.heater_active[1];
+        
+        // เดิม: standbyUsingMain || state.manual_preset_running
+        // ใหม่: ถ้า Auto Run อยู่ (!state.auto_running_background) ถึงจะยอมให้ Standby มาบัง
+        //      ถ้า Auto Run อยู่แล้ว (auto_running_background == true) ตัวมันเองเป็นเจ้าของ ไม่ต้องขึ้น In-use
+        bool isOtherModeRunning = state.manual_preset_running || (standbyUsingMain && !state.auto_running_background);
+        // -----------------------
+
         bool isThisCycleActive = (state.auto_step == (i + 1));
         bool globalRun = state.is_heating_active;
         bool isLocked = state.heater_cutoff_state[1]; 
@@ -1382,7 +1401,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
         bool isSelected = (_auto_selection == i);
         uint16_t bg_color = TFT_WHITE;
         
-        if (isManualRunningInBackground) {
+        if (isOtherModeRunning) {
             bg_color = C_GREY_BG;  
         }
         else {
@@ -1407,7 +1426,6 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
              _spr.drawRect(x, cycle_start_y, cycle_box_w, cycle_box_h, TFT_BLACK);
         }
 
-        // --- Cycle Content ---
         _spr.loadFont(Arial18);
         _spr.setTextColor(C_BLACK, bg_color);
         _spr.setTextDatum(TC_DATUM);
@@ -1418,7 +1436,6 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
         float t_set = convertTemp(config.auto_target_temps[i], state.temp_unit);
         float t_max = convertTemp(config.auto_max_temps[i], state.temp_unit);
 
-        // Positioning offsets (Adjusted for taller box)
         int set_y_label = cycle_start_y + 38;
         int set_y_val   = set_y_label + 14;
         int status_y_label = set_y_val + 24;
@@ -1450,7 +1467,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
             _spr.drawString("Status", x + (cycle_box_w/2), status_y_label);
             _spr.loadFont(Arial18);
             
-            if (isManualRunningInBackground) {
+            if (isOtherModeRunning) {
                 _spr.setTextColor(C_GREY_TXT, bg_color);
                 _spr.drawString("In-use", x + (cycle_box_w/2), status_y_val);
             }
@@ -1482,42 +1499,221 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
         _spr.unloadFont();
     }
 
-    // ---------------------------------------------------------
-    // 4. Bottom Sensors (IR1, IR2, TC Wire) - EXACT MATCH STANDBY
-    // ---------------------------------------------------------
-    // Left Box (IR) - Pink Background
+    // Bottom Sensors
     _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
     _spr.loadFont(Arial18);
     _spr.setTextColor(C_BLACK, C_PINK_BG);
     _spr.setTextDatum(ML_DATUM);
     
     char ir_buf[30];
-
-    // IR1
-    if (isnan(state.ir_temps[0])) {
-      snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit);
-    } else {
-      float ir1 = convertTemp(state.ir_temps[0], state.temp_unit);
-      snprintf(ir_buf, 30, "IR1 : %.1f%c", ir1, state.temp_unit);
-    }
-    // ตำแหน่งเดียวกับ Standby: sensor_y + (sensor_h/4) + 2
+    if (isnan(state.ir_temps[0])) { snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); } else { float ir1 = convertTemp(state.ir_temps[0], state.temp_unit); snprintf(ir_buf, 30, "IR1 : %.1f%c", ir1, state.temp_unit); }
     _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
-
-    // IR2
-    if (isnan(state.ir_temps[1])) {
-      snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit);
-    } else {
-      float ir2 = convertTemp(state.ir_temps[1], state.temp_unit);
-      snprintf(ir_buf, 30, "IR2 : %.1f%c", ir2, state.temp_unit);
-    }
-    // ตำแหน่งเดียวกับ Standby: sensor_y + (sensor_h*3/4) - 1
+    if (isnan(state.ir_temps[1])) { snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); } else { float ir2 = convertTemp(state.ir_temps[1], state.temp_unit); snprintf(ir_buf, 30, "IR2 : %.1f%c", ir2, state.temp_unit); }
     _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
     _spr.unloadFont();
 
-    // Right Box (TC Wire) - Lime Background
-    int tc_x = gap + sensor_w + gap; // (หรือใช้ logic เดิมในฟังก์ชันนั้น)
+    int tc_x = gap + sensor_w + gap; 
     _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
+    _spr.loadFont(Arial18);
+    _spr.setTextColor(C_BLACK, C_LIME_BG);
+    char wire_buf[40];
+    int center_x = tc_x + (sensor_w/2);
+    int center_y = sensor_y + (sensor_h/2);
+
+    if (isnan(state.tc_probe_temp)) { snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); } else { float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit); snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit); }
+    _spr.setTextDatum(BC_DATUM); 
+    _spr.drawString(wire_buf, center_x, center_y - 2);
+
+    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) { snprintf(wire_buf, 40, "Max(5s): ---"); } else { float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit); snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit); }
     
+    _spr.setTextDatum(TC_DATUM); 
+    _spr.drawString(wire_buf, center_x, center_y + 2);
+    _spr.unloadFont();
+}
+
+void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& config) {
+    drawTaskBar(); 
+    
+    int w = _spr.width();
+    int h = _spr.height();
+    int header_y = 24; 
+    int header_h = 30;
+    
+    _spr.fillRect(0, header_y, w, header_h, C_BLACK); 
+    
+    _spr.loadFont(Arial18);
+    _spr.setTextColor(TFT_WHITE, C_BLACK);
+    _spr.setTextDatum(ML_DATUM);
+    _spr.drawString("Manual Mode", 5, header_y + 15);
+
+    _spr.setTextDatum(MR_DATUM);
+    char buf[40];
+    float ir1_temp = state.ir_temps[0];
+    if (isnan(ir1_temp)) {
+        snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit);
+    } else {
+        float current_temp_display = convertTemp(ir1_temp, state.temp_unit);
+        snprintf(buf, 40, "Obj. Temp : %.1f%c", current_temp_display, state.temp_unit);
+    }
+    _spr.drawString(buf, w - 5, header_y + 15);
+    _spr.unloadFont();
+
+    // === Layout Setup ===
+    int gap = 6;
+    int sensor_y = h - 50;
+    int sensor_h = 50 - gap;
+    int sensor_w = (w - (3 * gap)) / 2;
+    int status_line_h = 24;
+    int status_line_y = sensor_y - status_line_h - gap;
+    int preset_start_y = header_y + header_h + gap;
+    int preset_area_h = status_line_y - gap - preset_start_y;
+    int preset_box_h = (preset_area_h - gap) / 2;
+    int preset_box_w = (w - (3 * gap)) / 2;
+    
+    // --- แก้ไข LOGIC ตรงนี้ ---
+    bool standbyUsingMain = state.manual_running_background && config.heater_active[1];
+    
+    // เดิม: state.auto_running_background || standbyUsingMain
+    // ใหม่: เพิ่ม !state.manual_preset_running
+    //      แปลว่า ถ้า Manual Preset (หน้านี้) รันอยู่แล้ว ไม่ต้องไปสน Standby 
+    //      (แต่ถ้า Auto รันอยู่ ให้ถือว่า In-use เหมือนเดิม เพราะ Auto ใหญ่สุด)
+    bool isOtherModeRunning = state.auto_running_background || (standbyUsingMain && !state.manual_preset_running);
+    // -----------------------
+
+    bool globalRun = state.is_heating_active;
+    bool isLocked = state.heater_cutoff_state[1]; 
+    bool isReady = state.heater_ready[1];
+    int activePresetIdx = -1;
+    if (state.manual_preset_running && globalRun) {
+        activePresetIdx = state.manual_preset_index;
+    }
+
+    // --- Draw 4 Presets ---
+    for (int i = 0; i < 4; i++) { 
+        int col = i % 2;
+        int row = i / 2;
+        int x = gap + (col * (preset_box_w + gap));
+        int y = preset_start_y + (row * (preset_box_h + gap));
+        
+        bool isThisPresetActive = (state.manual_preset_index == i && state.manual_preset_running);
+        bool isCursor = (_manual_selection == i);
+        bool isConfirmed = (_manual_confirmed_preset == i);
+        bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_MANUAL && isCursor);
+        
+        uint16_t bg_color = TFT_WHITE;
+        if (isOtherModeRunning) bg_color = C_GREY_BG;
+        else if (isEditingThis) bg_color = _blink_state ? TFT_WHITE : C_GREY_BG; 
+        else if (isThisPresetActive && globalRun) bg_color = C_ACTIVE_CYCLE_BG; 
+        else if (isConfirmed) bg_color = TFT_WHITE;
+        else bg_color = C_GREY_BG;
+
+        _spr.fillRect(x, y, preset_box_w, preset_box_h, bg_color);
+
+        if (isCursor) {
+            _spr.drawRect(x, y, preset_box_w, preset_box_h, TFT_RED);
+            _spr.drawRect(x+1, y+1, preset_box_w-2, preset_box_h-2, TFT_RED);
+        } else {
+            _spr.drawRect(x, y, preset_box_w, preset_box_h, TFT_BLACK);
+        }
+
+        // --- CONTENT LAYOUT: | Px | (Label small) Value big | ---
+        int split_w = preset_box_w * 0.30; 
+        _spr.loadFont(Arial18);
+        _spr.setTextColor(C_BLACK, bg_color);
+        _spr.setTextDatum(MC_DATUM);
+        snprintf(buf, 20, "P%d", i+1); 
+        _spr.drawString(buf, x + (split_w / 2), y + (preset_box_h / 2));
+        
+        _spr.drawFastVLine(x + split_w, y + 5, preset_box_h - 10, C_BLACK);
+        
+        float t_set = convertTemp(config.manual_target_temps[i], state.temp_unit);
+        float t_max = convertTemp(config.manual_max_temps[i], state.temp_unit);
+        
+        int text_start_x = x + split_w + 6; 
+        
+        // -- Label (SET/MAX) --
+        _spr.loadFont(Arial12);
+        _spr.setTextDatum(TL_DATUM);
+        
+        if (isEditingThis) {
+            if (_quick_edit_step == Q_EDIT_TARGET) {
+                 _spr.setTextColor(C_BLACK, bg_color);
+                 _spr.drawString("SET", text_start_x, y + 6);
+            } else {
+                 _spr.setTextColor(C_RED_TXT, bg_color);
+                 _spr.drawString("MAX", text_start_x, y + 6);
+            }
+        } else {
+            _spr.setTextColor(C_BLACK, bg_color);
+            _spr.drawString("SET", text_start_x, y + 6);
+        }
+
+        // -- Value --
+        _spr.loadFont(Arial18);
+        _spr.setTextDatum(TL_DATUM);
+        
+        if (isEditingThis) {
+             uint16_t val_color = (_quick_edit_step == Q_EDIT_TARGET) ? C_RED_TXT : C_BLACK;
+             if (_quick_edit_step == Q_EDIT_MAX) val_color = C_RED_TXT;
+
+             if (_quick_edit_step == Q_EDIT_TARGET) {
+                 _spr.setTextColor(val_color, bg_color);
+                 snprintf(buf, 30, "%.1f%c", t_set, state.temp_unit);
+             } else {
+                 _spr.setTextColor(val_color, bg_color);
+                 snprintf(buf, 30, "%.1f%c", t_max, state.temp_unit);
+             }
+        } else {
+            _spr.setTextColor(C_BLACK, bg_color);
+            snprintf(buf, 30, "%.1f%c", t_set, state.temp_unit);
+        }
+        
+        _spr.drawString(buf, text_start_x, y + 22);
+        
+        _spr.unloadFont();
+    }
+
+    // --- Status Line ---
+    _spr.setTextDatum(MC_DATUM);
+    _spr.loadFont(Arial18);
+    const char* status_text = "---";
+    uint16_t status_color = C_GREY_TXT;
+    
+    if (isOtherModeRunning) { status_text = "In-use"; status_color = C_GREY_TXT; }
+    else if (activePresetIdx >= 0) {
+        if (isLocked) { status_text = "Lock"; status_color = _blink_state ? C_RED_TXT : C_BLACK; }
+        else if (isReady) { status_text = "Ready"; status_color = C_GREEN_TXT; }
+        else { status_text = "Heating"; status_color = TFT_ORANGE; }
+    }
+    else if (_manual_confirmed_preset >= 0) { status_text = "Standby"; status_color = TFT_BLUE; }
+    
+    _spr.setTextColor(TFT_WHITE, C_BLACK);
+    snprintf(buf, 40, "Status : ");
+    _spr.setTextDatum(MR_DATUM);
+    _spr.drawString(buf, w/2, status_line_y + status_line_h/2);
+    _spr.setTextColor(status_color, C_BLACK);
+    _spr.setTextDatum(ML_DATUM);
+    _spr.drawString(status_text, w/2, status_line_y + status_line_h/2);
+    _spr.unloadFont();
+
+    // --- Bottom Sensor Row ---
+    _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
+    _spr.loadFont(Arial18);
+    _spr.setTextColor(C_BLACK, C_PINK_BG);
+    _spr.setTextDatum(ML_DATUM);
+    
+    if (isnan(state.ir_temps[0])) snprintf(buf, 30, "IR1: ---%c", state.temp_unit);
+    else { float v = convertTemp(state.ir_temps[0], state.temp_unit); snprintf(buf, 30, "IR1: %.1f%c", v, state.temp_unit); }
+    _spr.drawString(buf, gap + 5, sensor_y + 12);
+
+    if (isnan(state.ir_temps[1])) snprintf(buf, 30, "IR2: ---%c", state.temp_unit);
+    else { float v = convertTemp(state.ir_temps[1], state.temp_unit); snprintf(buf, 30, "IR2: %.1f%c", v, state.temp_unit); }
+    _spr.drawString(buf, gap + 5, sensor_y + sensor_h - 12);
+    _spr.unloadFont();
+
+    // Right: TC Wire
+    int tc_x = gap + sensor_w + gap;
+    _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
     _spr.loadFont(Arial18);
     _spr.setTextColor(C_BLACK, C_LIME_BG);
     
@@ -1526,25 +1722,21 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     int center_y = sensor_y + (sensor_h/2);
 
     if (isnan(state.tc_probe_temp)) {
-      snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit);
+      snprintf(wire_buf, 40, "TC Wire: ---%c", state.temp_unit);
     } else {
       float wire_t = convertTemp(state.tc_probe_temp, state.temp_unit);
-      snprintf(wire_buf, 40, "TC Temp: %.1f%c", wire_t, state.temp_unit);
+      snprintf(wire_buf, 40, "TC Wire: %.1f%c", wire_t, state.temp_unit);
     }
-    _spr.setTextDatum(BC_DATUM); // Bottom-Center (วางเหนือจุดกึ่งกลาง)
+    _spr.setTextDatum(BC_DATUM);
     _spr.drawString(wire_buf, center_x, center_y - 2);
 
-    // บรรทัดที่ 2: ค่า Max 5s (แสดงด้านล่างของกึ่งกลาง)
     if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) {
        snprintf(wire_buf, 40, "Max(5s): ---");
     } else {
        float wire_peak = convertTemp(state.tc_probe_peak, state.temp_unit);
        snprintf(wire_buf, 40, "Max(5s): %.1f%c", wire_peak, state.temp_unit);
     }
-    
-    _spr.setTextDatum(TC_DATUM); // Top-Center (วางใต้จุดกึ่งกลาง)
-    // เปลี่ยนฟอนต์ให้เล็กลงนิดหน่อยสำหรับบรรทัดล่าง หรือใช้ Arial18 เหมือนเดิมก็ได้
-    // กรณีนี้ใช้ Arial18 แต่อาจจะล้นถ้ากล่องเล็ก ลองดูผลลัพธ์ครับ
+    _spr.setTextDatum(TC_DATUM);
     _spr.drawString(wire_buf, center_x, center_y + 2);
     
     _spr.unloadFont();

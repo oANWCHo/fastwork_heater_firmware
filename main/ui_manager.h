@@ -6,8 +6,10 @@
 enum UIScreen {
   SCREEN_STANDBY,
   SCREEN_AUTO_MODE,
+  SCREEN_MANUAL_MODE,
   SCREEN_QUICK_EDIT,
   SCREEN_QUICK_EDIT_AUTO,
+  SCREEN_QUICK_EDIT_MANUAL,
   SCREEN_SLEEP,
   SCREEN_SETTINGS_PAGE_1, 
   SCREEN_SETTINGS_PAGE_2, 
@@ -65,6 +67,8 @@ struct ConfigState {
   float max_temp_lock;
   float auto_target_temps[3]; 
   float auto_max_temps[3];
+  float manual_target_temps[4];  // 4 presets for Manual Mode
+  float manual_max_temps[4];     // 4 presets for Manual Mode
   char temp_unit;
   IdleOffMode idle_off_mode;
   bool light_on;
@@ -92,7 +96,10 @@ struct AppState {
   bool auto_mode_enabled;        
   bool auto_running_background;  
   bool manual_running_background; 
+  bool manual_mode_enabled;       
+  bool manual_preset_running;     
   bool manual_was_started;
+  uint8_t manual_preset_index;
 };
 
 enum QuickEditStep {
@@ -120,9 +127,15 @@ public:
   void exitSettings();           
   void enterQuickEdit();
   void enterQuickEditAuto();
+  void enterQuickEditManual();
   void switchToAutoMode();
+  void switchToManualMode();
   void switchToStandby();  // เพิ่ม: บังคับกลับ Standby Mode
   UIScreen getScreen() const { return _current_screen; } 
+
+  int getManualSelection() const { return _manual_selection; }
+  int getManualConfirmedPreset() const { return _manual_confirmed_preset; }
+  void setManualConfirmedPreset(int preset) { _manual_confirmed_preset = preset; }
 
 private:
   TFT_eSPI* _tft;
@@ -140,6 +153,8 @@ private:
   
   int _standby_selection;
   int _auto_selection;
+  int _manual_selection;           // Current cursor position (red border)
+  int _manual_confirmed_preset;    // Which preset is actually confirmed/selected (0-2)
   
   uint32_t _last_activity_time;
 
@@ -161,6 +176,7 @@ private:
   void drawSettingsAbout(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
+  void drawManualModeScreen(const AppState& state, const ConfigState& config);
 
   void drawTaskBar();
   void drawHeader(const char* title); 
