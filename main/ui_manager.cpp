@@ -67,7 +67,7 @@ const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
 
 // [ADDED] Page 3 Labels
 const char* menu_item_labels_page_3[MENU_PAGE3_ITEM_COUNT] = {
-  "WiFi Settings", "< Prev Page"
+  "WiFi Settings", "Next Page >"
 };
 
 // [ADDED] WiFi Menu Labels
@@ -793,7 +793,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
     case SCREEN_SETTINGS_PAGE_3:
       switch (_selected_menu_item_page_3) {
         case MENU_PAGE3_WIFI_SETTINGS: _current_screen = SCREEN_SETTINGS_WIFI_MENU; _selected_wifi_menu_item = 0; break;
-        case MENU_PAGE3_PREV_PAGE: _current_screen = SCREEN_SETTINGS_PAGE_2; _selected_menu_item_page_2 = 0; break;
+        case MENU_PAGE3_NEXT_PAGE: _current_screen = SCREEN_SETTINGS_PAGE_1; _selected_menu_item = 0; break;
       }
       _menu_step_accumulator = 0.0f; return true;
 

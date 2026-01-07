@@ -54,7 +54,7 @@ enum MenuItemPage2 {
 // NEW: Page 3 menu items
 enum MenuItemPage3 {
   MENU_PAGE3_WIFI_SETTINGS,
-  MENU_PAGE3_PREV_PAGE,
+  MENU_PAGE3_NEXT_PAGE,
   MENU_PAGE3_ITEM_COUNT
 };
 
