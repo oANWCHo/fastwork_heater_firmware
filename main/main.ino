@@ -55,7 +55,7 @@
 #define BEEP_MODE_READY 2
 #define BEEP_MODE_ALARM 3
 
-#define MAIN_HEATER_INDEX 1  //(0=Heater1, 1=Heater2, 2=Heater3)
+#define MAIN_HEATER_INDEX 0  //(0=Heater1, 1=Heater2, 2=Heater3)
 
 // ========== [Auto Mode Control Sensor Selection] ==========
 // 0 = Thermocouple, 1 = IR1
@@ -665,7 +665,7 @@ void TaskInput(void* pvParameters) {
           } else if (scr == SCREEN_MANUAL_MODE) {
             ui.enterQuickEditManual();
           } else {
-            ui.handleButtonDoubleClick(config);
+            ui.handleButtonHold(config);
           }
           xSemaphoreGive(dataMutex);
         }

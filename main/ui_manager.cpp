@@ -263,7 +263,7 @@ void UIManager::drawTaskBar() {
         uint16_t warn_color = _blink_state ? TFT_YELLOW : TFT_ORANGE;
         _spr.drawXBitmap(warn_x, (h - WARNING_ICON_HEIGHT) / 2, warning_icon, WARNING_ICON_WIDTH, WARNING_ICON_HEIGHT, warn_color);
     }
-    _spr.setTextColor(TFT_LIGHTGREY, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString("Smart Heater", 5, h / 2);
+    _spr.setTextColor(TFT_LIGHTGREY, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString("", 5, h / 2);
 }
 
 void UIManager::drawHeader(const char* title) {
@@ -290,7 +290,7 @@ void UIManager::drawSettingsPage1(const AppState& state, const ConfigState& conf
     _spr.drawString(menu_item_labels_page_1[i], _spr.width() / 2, y + ITEM_HEIGHT / 2); _spr.unloadFont();
   }
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1);
-  _spr.drawString("Rot: Select | Press: OK | Dbl: Back", _spr.width() / 2, _spr.height() - 2);
+  _spr.drawString("Rot: Select | Press: OK | Hold: Back", _spr.width() / 2, _spr.height() - 2);
 }
 
 void UIManager::drawSettingsPage2(const AppState& state, const ConfigState& config) {
@@ -307,7 +307,7 @@ void UIManager::drawSettingsPage2(const AppState& state, const ConfigState& conf
     _spr.drawString(menu_item_labels_page_2[i], _spr.width() / 2, y + ITEM_HEIGHT / 2); _spr.unloadFont();
   }
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1);
-  _spr.drawString("Rot: Select | Press: OK | Dbl: Back", _spr.width() / 2, _spr.height() - 2);
+  _spr.drawString("Rot: Select | Press: OK | Hold: Back", _spr.width() / 2, _spr.height() - 2);
 }
 
 // [ADDED] Page 3 Drawing
@@ -325,7 +325,7 @@ void UIManager::drawSettingsPage3(const AppState& state, const ConfigState& conf
     _spr.drawString(menu_item_labels_page_3[i], _spr.width() / 2, y + ITEM_HEIGHT / 2); _spr.unloadFont();
   }
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1);
-  _spr.drawString("Rot: Select | Press: OK | Dbl: Back", _spr.width() / 2, _spr.height() - 2);
+  _spr.drawString("Rot: Select | Press: OK | Hold: Back", _spr.width() / 2, _spr.height() - 2);
 }
 
 // [ADDED] WiFi Menu Drawing
@@ -494,9 +494,9 @@ void UIManager::drawCharEntryScreen(const char* title, bool is_password) {
   _spr.setTextDatum(BC_DATUM);
   _spr.setTextSize(1);
   if (_char_entry_editing) {
-    _spr.drawString("Rot:Char | Press:Set | Dbl:Cancel", w / 2, h - 12);
+    _spr.drawString("Rot:Char | Press:Set | Hold:Cancel", w / 2, h - 12);
   } else {
-    _spr.drawString("Rot:Move | Press:Edit | Dbl:Done", w / 2, h - 12);
+    _spr.drawString("Rot:Move | Press:Edit | Hold:Done", w / 2, h - 12);
   }
   
   char len_buf[30];
@@ -554,7 +554,7 @@ void UIManager::drawSettingsWiFiStatus(const AppState& state, const ConfigState&
   _spr.drawString(config.wifi_config.use_custom ? "Custom" : "Default", x_value, y);
   
   _spr.unloadFont();
-  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press or Dbl: Back", _spr.width() / 2, _spr.height() - 10);
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press or Hold: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 void UIManager::drawSettingsStartup(const AppState& state, const ConfigState& config) {
@@ -610,7 +610,7 @@ void UIManager::drawSettingsSound(const AppState& state, const ConfigState& conf
     _spr.setTextDatum(MC_DATUM); _spr.setTextColor(C_SELECT_TXT, C_SELECT_BG); _spr.loadFont(Arial18);
     char buf[30]; snprintf(buf, 30, "Sound: %s", config.sound_on ? "ON" : "OFF");
     _spr.drawString(buf, _spr.width() / 2, y + h/2); _spr.unloadFont();
-    _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Toggle | Dbl: Back", _spr.width() / 2, _spr.height() - 10); 
+    _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Toggle | Hold: Back", _spr.width() / 2, _spr.height() - 10); 
 }
 
 void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState& config) {
@@ -641,7 +641,7 @@ void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState&
       _spr.drawString(buf, _spr.width() / 2, y + ITEM_HEIGHT / 2);
   }
   _spr.unloadFont();
-  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Adjust | Press: Switch | Dbl: Back", _spr.width() / 2, _spr.height() - 10);
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Adjust | Press: Switch | Hold: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState& config) {
@@ -673,7 +673,7 @@ void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState&
      _spr.setTextColor(txt, bg); _spr.drawString(options[i], _spr.width() / 2, y + h/2);
   }
   _spr.unloadFont();
-  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press: Action | Dbl: Back", _spr.width() / 2, _spr.height() - 10);
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press: Action | Hold: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 void UIManager::drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config) {
@@ -737,7 +737,7 @@ void UIManager::drawSettingsAbout(const AppState& state) {
     _spr.drawString("(c) 2025 K'Tor", _spr.width() / 2, y_start + (line_height * 4));
     _spr.drawString("Contact: 08x-xxx-xxxx", _spr.width() / 2, y_start + (line_height * 6));
     _spr.unloadFont();
-    _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press or Dbl: Back", _spr.width() / 2, _spr.height() - 10);
+    _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Press or Hold: Back", _spr.width() / 2, _spr.height() - 10);
 }
 
 // --- Logic Implementations (Button/Encoder) ---
@@ -959,7 +959,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
   }
 }
 
-bool UIManager::handleButtonDoubleClick(ConfigState& config) {
+bool UIManager::handleButtonHold(ConfigState& config) {
   if (_current_screen == SCREEN_SLEEP) { _current_screen = SCREEN_STANDBY; resetInactivityTimer(); return true; }
   if (_current_screen == SCREEN_MANUAL_MODE) { enterQuickEditManual(); return true; }
   resetInactivityTimer();
@@ -1157,7 +1157,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   for (int i = 0; i < 3; i++) {
       int x = gap + (i * (heater_w + gap)), y = top_offset + gap; 
       bool isActive = config.heater_active[i], isLocked = state.heater_cutoff_state[i], globalRun = state.is_heating_active;
-      bool isControlledByOther = (i == 1) && (state.auto_running_background || state.manual_preset_running);
+      bool isControlledByOther = (i == 0) && (state.auto_running_background || state.manual_preset_running);
       uint16_t bg_color = isControlledByOther ? C_GREY_BG : ((isActive || isLocked) ? C_WHITE : C_GREY_BG);
       if (_current_screen == SCREEN_QUICK_EDIT && _standby_selection == i) bg_color = _blink_state ? C_WHITE : C_GREY_BG;
 
@@ -1229,9 +1229,9 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
 
     for (int i = 0; i < 3; i++) { 
         int x = gap + (i * (cycle_box_w + gap));
-        bool standbyUsingMain = state.manual_running_background && config.heater_active[1];
+        bool standbyUsingMain = state.manual_running_background && config.heater_active[0];
         bool isOtherModeRunning = state.manual_preset_running || (standbyUsingMain && !state.auto_running_background);
-        bool isThisCycleActive = (state.auto_step == (i + 1)), globalRun = state.is_heating_active, isLocked = state.heater_cutoff_state[1], isReady = state.heater_ready[1], isSelected = (_auto_selection == i);
+        bool isThisCycleActive = (state.auto_step == (i + 1)), globalRun = state.is_heating_active, isLocked = state.heater_cutoff_state[0], isReady = state.heater_ready[0], isSelected = (_auto_selection == i);
         uint16_t bg_color = isOtherModeRunning ? C_GREY_BG : ((_current_screen == SCREEN_QUICK_EDIT_AUTO && isSelected) ? (_blink_state ? TFT_WHITE : C_GREY_BG) : ((isThisCycleActive && globalRun) ? C_ACTIVE_CYCLE_BG : TFT_WHITE));
 
         _spr.fillRect(x, cycle_start_y, cycle_box_w, cycle_box_h, bg_color);
@@ -1287,9 +1287,9 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     int gap = 6, sensor_y = h - 50, sensor_h = 50 - gap, sensor_w = (w - (3 * gap)) / 2;
     int status_line_h = 24, status_line_y = sensor_y - status_line_h - gap, preset_start_y = header_y + header_h + gap, preset_area_h = status_line_y - gap - preset_start_y;
     int preset_box_h = (preset_area_h - gap) / 2, preset_box_w = (w - (3 * gap)) / 2;
-    bool standbyUsingMain = state.manual_running_background && config.heater_active[1];
+    bool standbyUsingMain = state.manual_running_background && config.heater_active[0];
     bool isOtherModeRunning = state.auto_running_background || (standbyUsingMain && !state.manual_preset_running);
-    bool globalRun = state.is_heating_active, isLocked = state.heater_cutoff_state[1], isReady = state.heater_ready[1];
+    bool globalRun = state.is_heating_active, isLocked = state.heater_cutoff_state[0], isReady = state.heater_ready[0];
     int activePresetIdx = (state.manual_preset_running && globalRun) ? state.manual_preset_index : -1;
 
     for (int i = 0; i < 4; i++) { 

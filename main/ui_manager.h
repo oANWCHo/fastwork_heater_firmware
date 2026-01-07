@@ -152,7 +152,7 @@ public:
   void draw(const AppState& state, const ConfigState& config);
   
   bool handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to);
-  bool handleButtonDoubleClick(ConfigState& config);
+  bool handleButtonHold(ConfigState& config);
   bool handleEncoderRotation(float steps, ConfigState& config);
 
   bool checkInactivity(ConfigState& config, bool& has_go_to, float& go_to);
