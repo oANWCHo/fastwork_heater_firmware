@@ -26,6 +26,7 @@ enum UIScreen {
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_TC_PROBE_CAL,
   SCREEN_SETTINGS_ABOUT,
+  SCREEN_SETTINGS_BRIGHTNESS,
   SCREEN_SETTINGS_WIFI_MENU,        // NEW: WiFi sub-menu
   SCREEN_SETTINGS_WIFI_SSID,        // NEW: SSID entry screen
   SCREEN_SETTINGS_WIFI_PASSWORD,    // NEW: Password entry screen
@@ -37,7 +38,6 @@ enum MenuItemPage1 {
   MENU_PAGE1_CALIBRATION, 
   MENU_PAGE1_EMISSIVITY,
   MENU_PAGE1_TC_PROBE_CAL, 
-  MENU_PAGE1_NEXT_PAGE,
   MENU_PAGE1_ITEM_COUNT 
 };
 
@@ -46,15 +46,14 @@ enum MenuItemPage2 {
   MENU_PAGE2_STARTUP,  
   MENU_PAGE2_SOUND,
   MENU_PAGE2_TEMP_UNIT,
+  MENU_PAGE2_BRIGHTNESS,
   MENU_PAGE2_ABOUT,
-  MENU_PAGE2_NEXT_PAGE,   // Changed from PREV to NEXT
   MENU_PAGE2_ITEM_COUNT
 };
 
 // NEW: Page 3 menu items
 enum MenuItemPage3 {
   MENU_PAGE3_WIFI_SETTINGS,
-  MENU_PAGE3_NEXT_PAGE,
   MENU_PAGE3_ITEM_COUNT
 };
 
@@ -105,11 +104,13 @@ struct ConfigState {
   IdleOffMode idle_off_mode;
   bool light_on;
   bool sound_on;
+  uint8_t sound_volume;
   bool heater_active[3];
   float tc_offsets[3];
   float tc_probe_offset;
   StartupMode startup_mode;
   float ir_emissivity[2];
+  uint8_t brightness;
   WiFiConfig wifi_config;  // NEW: WiFi settings
 };
 
@@ -227,6 +228,7 @@ private:
   void drawSettingsTCProbeCal(const AppState& state, const ConfigState& config);
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
+  void drawSettingsBrightness(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
   void drawManualModeScreen(const AppState& state, const ConfigState& config);

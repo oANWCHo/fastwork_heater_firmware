@@ -33,6 +33,7 @@
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
 #define MAXCS4 18  // CS4
+#define TFT_BL 38
 
 #define ENCODER_A 6
 #define ENCODER_B 7
@@ -41,6 +42,9 @@
 #define SDA_PIN 4
 #define SCL_PIN 5
 #define BUZZER 41
+#define BUZZER_CHANNEL 2  // ใช้ Channel 2 (จะได้ไม่ชนกับ Backlight ที่มักใช้ 0 หรือ 1)
+#define BUZZER_FREQ 2700  
+#define BUZZER_RES 8      // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
 #define PCF_INT 21
 
@@ -500,9 +504,6 @@ void TaskHeater1Control(void* pvParameters) {
       is_auto_controlled = true;
       target_t = config.manual_target_temps[local_preset_idx];
       max_t = config.manual_max_temps[local_preset_idx];
-#if AUTO_CONTROL_SENSOR == 1
-      current_t = ir1_temp;
-#endif
     }
     // 3. STANDBY / BASIC MANUAL
     else {
@@ -659,11 +660,15 @@ void TaskHeater2Control(void* pvParameters) {
   for (;;) {
     float current_t = NAN;
     bool local_manual_started = false;
+    bool local_auto_running = false;
+    bool local_preset_running = false;
 
     // Read shared data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       current_t = sysState.tc_temps[HEATER_IDX];
       local_manual_started = sysState.manual_was_started;
+      local_auto_running = sysState.auto_was_started;
+      local_preset_running = sysState.manual_preset_running;
       xSemaphoreGive(dataMutex);
     }
 
@@ -671,9 +676,11 @@ void TaskHeater2Control(void* pvParameters) {
     float target_t = config.target_temps[HEATER_IDX];
     float max_t = config.max_temps[HEATER_IDX];
 
-    // Heater 2 only runs in manual mode
-    if (!local_manual_started) {
-      is_active = false;
+    if (local_auto_running || local_preset_running) {
+        is_active = false;
+    } 
+    else if (!local_manual_started) {
+        is_active = false;
     }
 
     // === PID & OUTPUT LOGIC ===
@@ -768,6 +775,8 @@ void TaskHeater3Control(void* pvParameters) {
   const int HEATER_IDX = 2;
   const TickType_t xFrequency = pdMS_TO_TICKS(50);
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  bool local_auto_running = false;
+  bool local_preset_running = false;
 
   // Local state for this heater
   float ready_stable_start = 0;
@@ -783,16 +792,20 @@ void TaskHeater3Control(void* pvParameters) {
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       current_t = sysState.tc_temps[HEATER_IDX];
       local_manual_started = sysState.manual_was_started;
+      local_auto_running = sysState.auto_was_started;
+      local_preset_running = sysState.manual_preset_running;
       xSemaphoreGive(dataMutex);
     }
 
     bool is_active = config.heater_active[HEATER_IDX];
     float target_t = config.target_temps[HEATER_IDX];
     float max_t = config.max_temps[HEATER_IDX];
-
-    // Heater 3 only runs in manual mode
-    if (!local_manual_started) {
-      is_active = false;
+    
+    if (local_auto_running || local_preset_running) {
+        is_active = false;
+    } 
+    else if (!local_manual_started) {
+        is_active = false;
     }
 
     // === PID & OUTPUT LOGIC ===
@@ -927,8 +940,14 @@ void TaskInput(void* pvParameters) {
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
           UIScreen scr = ui.getScreen();
           ui.handleButtonSingleClick(config, go_to, has_go_to);
-          if (scr == SCREEN_MANUAL_MODE && sysState.manual_preset_running && has_go_to) {
+          if (scr == SCREEN_MANUAL_MODE) {
             sysState.manual_preset_index = ui.getManualConfirmedPreset();
+
+            sysState.manual_preset_running = true;
+            sysState.manual_was_started = true;
+            sysState.auto_was_started = false; 
+            sysState.auto_step = 0;
+            has_go_to = true;
           }
           xSemaphoreGive(dataMutex);
         }
@@ -1152,27 +1171,29 @@ void TaskDebug(void* pvParameters) {
 
 // 7. SOUND TASK
 void TaskSound(void* pvParameters) {
-  pinMode(BUZZER, OUTPUT);
-  digitalWrite(BUZZER, LOW);
+  ledcAttach(BUZZER, BUZZER_FREQ, BUZZER_RES);
 
   for (;;) {
     if (beep_queue > 0) {
       int on_time = 60;
       int off_time = 100;
-      if (beep_mode == 1) {
-        on_time = 250;
-        off_time = 250;
-      } else if (beep_mode == 3) {
-        on_time = 3000;
-        off_time = 100;
-      }
+      
+      if (beep_mode == 1) { on_time = 250; off_time = 250; } 
+      else if (beep_mode == 3) { on_time = 3000; off_time = 100; }
 
-      if (config.sound_on) {
-        digitalWrite(BUZZER, HIGH);
+      // --- ขับเสียงด้วย PWM (API v3.0+) ---
+      if (config.sound_volume > 0) {
+        int duty = map(config.sound_volume, 0, 100, 0, 128);
+        
+        // แก้ไข: ส่งค่าไปที่ขา BUZZER โดยตรง (ไม่ต้องใส่ Channel แล้ว)
+        ledcWrite(BUZZER, duty); 
+      } else {
+        ledcWrite(BUZZER, 0); 
       }
-
+      
       vTaskDelay(pdMS_TO_TICKS(on_time));
-      digitalWrite(BUZZER, LOW);
+      
+      ledcWrite(BUZZER, 0); // ปิดเสียง
       vTaskDelay(pdMS_TO_TICKS(off_time));
 
       if (beep_queue >= 2) beep_queue -= 2;
@@ -1180,6 +1201,7 @@ void TaskSound(void* pvParameters) {
 
       if (beep_queue == 0) beep_mode = 0;
     } else {
+      ledcWrite(BUZZER, 0); // เงียบเมื่อไม่มีคิว
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
@@ -1242,7 +1264,7 @@ void setup() {
     config.temp_unit = 'C';
     config.idle_off_mode = IDLE_OFF_30_MIN;
     config.startup_mode = STARTUP_OFF;
-    config.sound_on = true;
+    config.sound_volume = 100;
     config.ir_emissivity[0] = 1.0f;
     config.ir_emissivity[1] = 1.0f;
     config.tc_probe_offset = 0.0f;
@@ -1278,12 +1300,12 @@ void setup() {
   digitalWrite(SSR_PIN2, LOW);
   pinMode(SSR_PIN3, OUTPUT);
   digitalWrite(SSR_PIN3, LOW);
-  pinMode(BUZZER, OUTPUT);
-  digitalWrite(BUZZER, LOW);
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
   pinMode(ENCODER_SW, INPUT_PULLUP);
-
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
+  
   max31855_init_pins();
   setup_encoder_fixed();
 
@@ -1292,6 +1314,8 @@ void setup() {
 
   mlx1.begin(IR1_ADDR, &Wire);
   mlx2.begin(IR2_ADDR, &Wire);
+
+  setBrightness(config.brightness);
 
   tft.init();
   tft.setRotation(3);
@@ -1462,6 +1486,11 @@ void setup_encoder_fixed() {
   pcnt_counter_resume(PCNT_UNIT_0);
 }
 
+void setBrightness(uint8_t val) {
+    int duty = map(val, 0, 100, 0, 255);
+    analogWrite(TFT_BL, duty); 
+}
+
 void read_hardware_encoder(float* delta_out) {
   int16_t val = 0;
   if (pcnt_get_counter_value(PCNT_UNIT_0, &val) == ESP_OK) {
@@ -1482,6 +1511,7 @@ void read_hardware_encoder(float* delta_out) {
 
 void saveConfig(const ConfigState& cfg) {
   preferences.putBytes("config", &cfg, sizeof(cfg));
+  setBrightness(cfg.brightness);
 }
 
 void loadConfig(ConfigState& cfg) {
@@ -1492,4 +1522,6 @@ void loadConfig(ConfigState& cfg) {
     memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
     cfg.wifi_config.use_custom = false;
   }
+
+  if (cfg.brightness == 0 && cfg.wifi_config.use_custom == false) cfg.brightness = 100;
 }
