@@ -657,10 +657,10 @@ void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState&
   } else {
     float raw_c = state.tc_probe_temp - config.tc_probe_offset;
     _spr.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-    snprintf(buf, 32, "Raw: %.2f %c", convertTemp(raw_c, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y);
-    snprintf(buf, 32, "Offset: %.2f %c", convertDelta(config.tc_probe_offset, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y + 25);
+    snprintf(buf, 32, "Raw: %.0f %c", convertTemp(raw_c, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y);
+    snprintf(buf, 32, "Offset: %.0f %c", convertDelta(config.tc_probe_offset, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y + 25);
     _spr.setTextColor(TFT_GREEN, TFT_BLACK);
-    snprintf(buf, 32, "Val: %.2f %c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y + 50);
+    snprintf(buf, 32, "Val: %.0f %c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.drawString(buf, _spr.width() / 2, info_y + 50);
   }
 
   int start_y = 150; const char* options[] = {"Tare (Set 0)", "Reset (0.0)"};
@@ -688,12 +688,12 @@ void UIManager::drawSettingsCalibrationSelect(const AppState& state, const Confi
     if (i == _selected_menu_item) {
         bg = C_SELECT_BG; 
         if (_is_editing_calibration) {
-            txt = C_RED_TXT; snprintf(item_labels[i], 30, "<< %.1f %c >>", disp_off, state.temp_unit);
+            txt = C_RED_TXT; snprintf(item_labels[i], 30, "<< %.0f %c >>", disp_off, state.temp_unit);
         } else {
-            txt = C_SELECT_TXT; snprintf(item_labels[i], 30, "Heater %d Offset: %.1f%c", i+1, disp_off, state.temp_unit);
+            txt = C_SELECT_TXT; snprintf(item_labels[i], 30, "Heater %d Offset: %.0f%c", i+1, disp_off, state.temp_unit);
         }
     } else {
-        snprintf(item_labels[i], 30, "Heater %d Offset: %.1f%c", i+1, disp_off, state.temp_unit);
+        snprintf(item_labels[i], 30, "Heater %d Offset: %.0f%c", i+1, disp_off, state.temp_unit);
     }
     _spr.fillRect(10, y, w, h, bg); if(i == _selected_menu_item) _spr.drawRect(10, y, w, h, TFT_DARKGREY);
     _spr.setTextDatum(MC_DATUM); _spr.setTextColor(txt, bg); _spr.drawString(item_labels[i], _spr.width() / 2, y + h/2);
@@ -705,7 +705,7 @@ void UIManager::drawSettingsCalibrationSelect(const AppState& state, const Confi
 void UIManager::drawSettingsHeaterTargetTemp(const AppState& state) {
   char title_buffer[20]; snprintf(title_buffer, sizeof(title_buffer), "Heater (%d)", _selected_menu_item + 1); drawHeader(title_buffer);
   _spr.setTextColor(TFT_WHITE, TFT_BLACK); _spr.setTextDatum(MC_DATUM); _spr.loadFont(Arial18);
-  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Target Temp: %.1f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
+  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Target Temp: %.0f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
   _spr.drawString(temp_buffer, _spr.width() / 2, _spr.height() / 2); _spr.unloadFont();
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
 }
@@ -713,7 +713,7 @@ void UIManager::drawSettingsHeaterTargetTemp(const AppState& state) {
 void UIManager::drawSettingsHeaterMaxTemp(const AppState& state) {
   char title_buffer[20]; snprintf(title_buffer, sizeof(title_buffer), "Heater (%d)", _selected_menu_item + 1); drawHeader(title_buffer);
   _spr.setTextColor(TFT_WHITE, TFT_BLACK); _spr.setTextDatum(MC_DATUM); _spr.loadFont(Arial18);
-  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Max Temp: %.1f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
+  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Max Temp: %.0f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
   _spr.drawString(temp_buffer, _spr.width() / 2, _spr.height() / 2); _spr.unloadFont();
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
 }
@@ -723,7 +723,7 @@ void UIManager::drawSettingsHeaterCalibrate(const AppState& state) { drawHeader(
 void UIManager::drawSettingsMaxTempLock(const AppState& state) {
   drawHeader("Max Temp Lock");
   _spr.setTextColor(TFT_WHITE, TFT_BLACK); _spr.setTextDatum(MC_DATUM); _spr.loadFont(Arial18);
-  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Max Temp: %.1f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
+  char temp_buffer[30]; snprintf(temp_buffer, sizeof(temp_buffer), "Max Temp: %.0f %c", convertTemp(_temp_edit_value, state.temp_unit), state.temp_unit);
   _spr.drawString(temp_buffer, _spr.width() / 2, _spr.height() / 2); _spr.unloadFont();
   _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1); _spr.drawString("Rot: Adjust | Press: Confirm", _spr.width() / 2, _spr.height() - 10);
 }
@@ -1169,20 +1169,20 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
       int start_y = y + 36, val_offset = 14, section_gap = 42;
       if (_current_screen == SCREEN_QUICK_EDIT && _standby_selection == i) {
           _spr.unloadFont(); _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); _spr.drawString("SET", center_x, start_y);
-          _spr.unloadFont(); _spr.loadFont(Arial18); char buf[20]; snprintf(buf, 20, "%.1f%c", convertTemp(config.target_temps[i], state.temp_unit), state.temp_unit);
+          _spr.unloadFont(); _spr.loadFont(Arial18); char buf[20]; snprintf(buf, 20, "%.0f%c", convertTemp(config.target_temps[i], state.temp_unit), state.temp_unit);
           _spr.setTextColor((_quick_edit_step == Q_EDIT_TARGET) ? C_RED_TXT : C_BLACK, bg_color); _spr.drawString(buf, center_x, start_y + val_offset);
           _spr.unloadFont(); _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); int max_y = start_y + section_gap; _spr.drawString("MAX", center_x, max_y);
-          _spr.unloadFont(); _spr.loadFont(Arial18); snprintf(buf, 20, "%.1f%c", convertTemp(config.max_temps[i], state.temp_unit), state.temp_unit);
+          _spr.unloadFont(); _spr.loadFont(Arial18); snprintf(buf, 20, "%.0f%c", convertTemp(config.max_temps[i], state.temp_unit), state.temp_unit);
           _spr.setTextColor((_quick_edit_step == Q_EDIT_MAX) ? C_RED_TXT : C_BLACK, bg_color); _spr.drawString(buf, center_x, max_y + val_offset);
       } else {
           _spr.unloadFont(); _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); _spr.drawString("NOW", center_x, start_y);
           _spr.unloadFont(); _spr.loadFont(Arial18); char buf[20];
           if (isnan(state.tc_temps[i])) { snprintf(buf, 20, "---%c", state.temp_unit); _spr.setTextColor(C_GREY_TXT, bg_color); } 
-          else { snprintf(buf, 20, "%.1f%c", convertTemp(state.tc_temps[i], state.temp_unit), state.temp_unit); _spr.setTextColor((isLocked && _blink_state) ? C_RED_TXT : C_BLACK, bg_color); }
+          else { snprintf(buf, 20, "%.0f%c", convertTemp(state.tc_temps[i], state.temp_unit), state.temp_unit); _spr.setTextColor((isLocked && _blink_state) ? C_RED_TXT : C_BLACK, bg_color); }
           _spr.drawString(buf, center_x, start_y + val_offset);
 
           int set_y = start_y + section_gap; _spr.unloadFont(); _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); _spr.drawString("SET", center_x, set_y);
-          _spr.unloadFont(); _spr.loadFont(Arial18); snprintf(buf, 20, "%.1f%c", convertTemp(config.target_temps[i], state.temp_unit), state.temp_unit);
+          _spr.unloadFont(); _spr.loadFont(Arial18); snprintf(buf, 20, "%.0f%c", convertTemp(config.target_temps[i], state.temp_unit), state.temp_unit);
           _spr.setTextColor(C_BLACK, bg_color); _spr.drawString(buf, center_x, set_y + val_offset);
 
           int status_y = set_y + section_gap; _spr.unloadFont(); _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); _spr.drawString("Status", center_x, status_y);
@@ -1204,15 +1204,15 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
   _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_PINK_BG); _spr.setTextDatum(ML_DATUM);
   char ir_buf[30];
-  if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR1 : %.1f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
+  if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR1 : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
-  if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR2 : %.1f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit);
+  if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR2 : %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
   _spr.unloadFont(); int tc_x = gap + sensor_w + gap; _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
   _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_LIME_BG); char wire_buf[40]; int center_x = tc_x + (sensor_w/2); int center_y = sensor_y + (sensor_h/2);
-  if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Temp: %.1f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit);
+  if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Temp: %.0f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit);
   _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
-  if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.1f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit);
+  if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.0f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit);
   _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2); _spr.unloadFont();
 }
 
@@ -1221,7 +1221,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.fillRect(0, header_y, w, header_h, C_BLACK); 
     _spr.loadFont(Arial18); _spr.setTextColor(TFT_WHITE, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString("Auto mode", 5, header_y + 15);
     _spr.setTextDatum(MR_DATUM); char buf[40];
-    if (isnan(state.ir_temps[0])) snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit); else snprintf(buf, 40, "Obj. Temp : %.1f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
+    if (isnan(state.ir_temps[0])) snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit); else snprintf(buf, 40, "Obj. Temp : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
     _spr.drawString(buf, w - 5, header_y + 15); _spr.unloadFont();
 
     int gap = 6, sensor_y = 24 + 6 + 158 + 6, sensor_h = h - sensor_y - gap, sensor_w = (w - (3 * gap)) / 2;
@@ -1246,13 +1246,13 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
         _spr.loadFont(Arial18);
         bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_AUTO && isSelected);
         _spr.setTextColor((isEditingThis && _quick_edit_step == Q_EDIT_TARGET) ? C_RED_TXT : C_BLACK, bg_color);
-        snprintf(buf, 20, "%.1f%c", convertTemp(config.auto_target_temps[i], state.temp_unit), state.temp_unit); _spr.drawString(buf, x + (cycle_box_w/2), set_y_val);
+        snprintf(buf, 20, "%.0f%c", convertTemp(config.auto_target_temps[i], state.temp_unit), state.temp_unit); _spr.drawString(buf, x + (cycle_box_w/2), set_y_val);
 
         _spr.loadFont(Arial12); _spr.setTextColor(C_BLACK, bg_color); _spr.setTextDatum(TC_DATUM);
         if (isEditingThis) {
             _spr.drawString("MAX", x + (cycle_box_w/2), status_y_label); _spr.loadFont(Arial18);
             _spr.setTextColor((_quick_edit_step == Q_EDIT_MAX) ? C_RED_TXT : C_BLACK, bg_color);
-            snprintf(buf, 20, "%.1f%c", convertTemp(config.auto_max_temps[i], state.temp_unit), state.temp_unit); _spr.drawString(buf, x + (cycle_box_w/2), status_y_val);
+            snprintf(buf, 20, "%.0f%c", convertTemp(config.auto_max_temps[i], state.temp_unit), state.temp_unit); _spr.drawString(buf, x + (cycle_box_w/2), status_y_val);
         } else {
             _spr.drawString("Status", x + (cycle_box_w/2), status_y_label); _spr.loadFont(Arial18);
             if (isOtherModeRunning) { _spr.setTextColor(C_GREY_TXT, bg_color); _spr.drawString("In-use", x + (cycle_box_w/2), status_y_val); }
@@ -1268,20 +1268,20 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG);
     _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_PINK_BG); _spr.setTextDatum(ML_DATUM);
     char ir_buf[30];
-    if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR1 : %.1f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit); _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
-    if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR2 : %.1f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit); _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
+    if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR1 : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit); _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h/4) + 2);
+    if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit); else snprintf(ir_buf, 30, "IR2 : %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit); _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h*3/4) - 1);
     _spr.unloadFont(); int tc_x = gap + sensor_w + gap; _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG);
     _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_LIME_BG); char wire_buf[40]; int center_x = tc_x + (sensor_w/2); int center_y = sensor_y + (sensor_h/2);
-    if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Temp: %.1f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
-    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.1f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit); _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2); _spr.unloadFont();
+    if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Temp: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Temp: %.0f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
+    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.0f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit); _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2); _spr.unloadFont();
 }
 
 void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& config) {
     drawTaskBar(); int w = _spr.width(), h = _spr.height(), header_y = 24, header_h = 30;
     _spr.fillRect(0, header_y, w, header_h, C_BLACK); 
-    _spr.loadFont(Arial18); _spr.setTextColor(TFT_WHITE, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString("Manual Mode", 5, header_y + 15);
+    _spr.loadFont(Arial18); _spr.setTextColor(TFT_WHITE, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString("Presets", 5, header_y + 15);
     _spr.setTextDatum(MR_DATUM); char buf[40];
-    if (isnan(state.ir_temps[0])) snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit); else snprintf(buf, 40, "Obj. Temp : %.1f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
+    if (isnan(state.ir_temps[0])) snprintf(buf, 40, "Obj. Temp : ---%c", state.temp_unit); else snprintf(buf, 40, "Obj. Temp : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
     _spr.drawString(buf, w - 5, header_y + 15); _spr.unloadFont();
 
     int gap = 6, sensor_y = h - 50, sensor_h = 50 - gap, sensor_w = (w - (3 * gap)) / 2;
@@ -1316,8 +1316,8 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
         if (isEditingThis) {
              uint16_t val_color = (_quick_edit_step == Q_EDIT_TARGET) ? C_RED_TXT : C_BLACK; if (_quick_edit_step == Q_EDIT_MAX) val_color = C_RED_TXT;
              _spr.setTextColor(val_color, bg_color);
-             snprintf(buf, 30, "%.1f%c", convertTemp((_quick_edit_step == Q_EDIT_TARGET) ? config.manual_target_temps[i] : config.manual_max_temps[i], state.temp_unit), state.temp_unit);
-        } else { _spr.setTextColor(C_BLACK, bg_color); snprintf(buf, 30, "%.1f%c", convertTemp(config.manual_target_temps[i], state.temp_unit), state.temp_unit); }
+             snprintf(buf, 30, "%.0f%c", convertTemp((_quick_edit_step == Q_EDIT_TARGET) ? config.manual_target_temps[i] : config.manual_max_temps[i], state.temp_unit), state.temp_unit);
+        } else { _spr.setTextColor(C_BLACK, bg_color); snprintf(buf, 30, "%.0f%c", convertTemp(config.manual_target_temps[i], state.temp_unit), state.temp_unit); }
         _spr.drawString(buf, text_start_x, y + 22); _spr.unloadFont();
     }
 
@@ -1330,9 +1330,11 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     _spr.setTextColor(status_color, C_BLACK); _spr.setTextDatum(ML_DATUM); _spr.drawString(status_text, w/2, status_line_y + status_line_h/2); _spr.unloadFont();
 
     _spr.fillRect(gap, sensor_y, sensor_w, sensor_h, C_PINK_BG); _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_PINK_BG); _spr.setTextDatum(ML_DATUM);
-    if (isnan(state.ir_temps[0])) snprintf(buf, 30, "IR1: ---%c", state.temp_unit); else snprintf(buf, 30, "IR1: %.1f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit); _spr.drawString(buf, gap + 5, sensor_y + 12);
-    if (isnan(state.ir_temps[1])) snprintf(buf, 30, "IR2: ---%c", state.temp_unit); else snprintf(buf, 30, "IR2: %.1f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit); _spr.drawString(buf, gap + 5, sensor_y + sensor_h - 12); _spr.unloadFont();
+    if (isnan(state.ir_temps[0])) snprintf(buf, 30, "IR1: ---%c", state.temp_unit); else snprintf(buf, 30, "IR1: %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit); _spr.drawString(buf, gap + 5, sensor_y + 12);
+    if (isnan(state.ir_temps[1])) snprintf(buf, 30, "IR2: ---%c", state.temp_unit); else snprintf(buf, 30, "IR2: %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit); _spr.drawString(buf, gap + 5, sensor_y + sensor_h - 12); _spr.unloadFont();
     int tc_x = gap + sensor_w + gap; _spr.fillRect(tc_x, sensor_y, sensor_w, sensor_h, C_LIME_BG); _spr.loadFont(Arial18); _spr.setTextColor(C_BLACK, C_LIME_BG); char wire_buf[40]; int center_x = tc_x + (sensor_w/2); int center_y = sensor_y + (sensor_h/2);
-    if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Wire: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Wire: %.1f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
-    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.1f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit); _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2); _spr.unloadFont();
+    if (isnan(state.tc_probe_temp)) snprintf(wire_buf, 40, "TC Wire: ---%c", state.temp_unit); else snprintf(wire_buf, 40, "TC Wire: %.0f%c", convertTemp(state.tc_probe_temp, state.temp_unit), state.temp_unit); _spr.setTextDatum(BC_DATUM); _spr.drawString(wire_buf, center_x, center_y - 2);
+    if (isnan(state.tc_probe_peak) || state.tc_probe_peak < -100) snprintf(wire_buf, 40, "Max(5s): ---"); else snprintf(wire_buf, 40, "Max(5s): %.0f%c", convertTemp(state.tc_probe_peak, state.temp_unit), state.temp_unit); _spr.setTextDatum(TC_DATUM); _spr.drawString(wire_buf, center_x, center_y + 2); _spr.unloadFont();
 }
+
+

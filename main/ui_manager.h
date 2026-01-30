@@ -171,8 +171,6 @@ public:
   int getManualSelection() const { return _manual_selection; }
   int getManualConfirmedPreset() const { return _manual_confirmed_preset; }
   void setManualConfirmedPreset(int preset) { _manual_confirmed_preset = preset; }
-
-  // NEW: WiFi callback setter
   void setWiFiReconnectCallback(WiFiReconnectCallback callback) { _wifi_reconnect_callback = callback; }
 
 private:
