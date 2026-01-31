@@ -362,7 +362,7 @@ void TaskMAX(void* pvParameters) {
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
-          if (final_temp < 25.0f) final_temp = 25.0f;
+          // if (final_temp < 25.0f) final_temp = 25.0f;
         }
 
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
