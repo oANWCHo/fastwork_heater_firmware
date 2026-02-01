@@ -1,8 +1,3 @@
-/**
- * Merged Smart Heater Firmware
- * Combined functionalities of main.ino (Logic) and main_modified.ino (Non-blocking WiFi)
- */
-
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -43,8 +38,8 @@
 #define SCL_PIN 5
 #define BUZZER 41
 #define BUZZER_CHANNEL 2  // ใช้ Channel 2 (จะได้ไม่ชนกับ Backlight ที่มักใช้ 0 หรือ 1)
-#define BUZZER_FREQ 2700  
-#define BUZZER_RES 8      // ความละเอียด 8-bit
+#define BUZZER_FREQ 2700
+#define BUZZER_RES 8  // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
 #define PCF_INT 21
 
@@ -148,9 +143,9 @@ AsyncWebServer server(80);
 bool serverStarted = false;
 
 // ========== [PID Vars] ==========
-float Kp[3] = { 1.2f, 2.5f, 0.5f };
-float Ki[3] = { 0.02f, 0.5f, 0.01f };
-float Kd[3] = { 0.2f, 0.01f, 0.8f };
+float Kp[3] = { 1.2f, 1.2f, 1.2f };
+float Ki[3] = { 0.02f, 0.02f, 0.02f };
+float Kd[3] = { 0.2f, 0.2f, 0.2f };
 float pid_integral[3] = { 0.0f, 0.0f, 0.0f };
 float pid_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 uint32_t pid_last_time[3] = { 0, 0, 0 };
@@ -362,13 +357,34 @@ void TaskMAX(void* pvParameters) {
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
-          // if (final_temp < 25.0f) final_temp = 25.0f;
+          if (final_temp < 0.0f) final_temp = 0.0f;
         }
 
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
           if (i < 3) {
             sysState.tc_temps[i] = final_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
+            if (is_fault) {
+              // 1. สั่งปิด Heater ตัวที่เสีย (เอาติ๊กถูกออก)
+              config.heater_active[i] = false;
+
+              // 2. ถ้าเป็น Heater 1 (Main) ให้สั่งหยุด Auto และ Preset ทันที
+              if (i == 0) {
+                sysState.auto_was_started = false;       // ปิด Auto Mode
+                sysState.manual_preset_running = false;  // ปิด Manual Preset
+                sysState.auto_step = 0;
+
+                // 3. ถ้าเครื่องกำลังรันอยู่ ให้ Force Stop และร้องเตือน
+                if (has_go_to) {
+                  has_go_to = false;                    // สั่ง Stop
+                  sysState.manual_was_started = false;  // ปิด Manual (Standby run)
+
+                  // สั่งร้องเตือน (Alarm)
+                  beep_mode = 3;
+                  beep_queue = 10;
+                }
+              }
+            }
           } else {
             if (isnan(final_temp)) {
               sysState.tc_probe_temp = NAN;
@@ -439,6 +455,8 @@ void TaskHeater1Control(void* pvParameters) {
   uint32_t snapshot_timer = 0;
   float last_displayed_val = 0;
   bool prev_ready_state = false;
+
+  uint32_t auto_low_temp_timer = 0;
 
   for (;;) {
     float current_t = NAN;
@@ -511,7 +529,18 @@ void TaskHeater1Control(void* pvParameters) {
         is_active = false;
       }
     }
-
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        sysState.auto_step = 0;
+        xSemaphoreGive(dataMutex);
+      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
     bool cutoff_active = false;
@@ -583,7 +612,7 @@ void TaskHeater1Control(void* pvParameters) {
           if (control_temp > peak_temp) peak_temp = control_temp;
         }
 
-        if (has_reached_target && (peak_temp - control_temp) > 5.0f) {
+        if (has_reached_target && (control_temp < 40.0f)) {
           if (millis() - cycle_change_debounce > 1000) {
             if (current_auto_step < 3) {
               current_auto_step++;
@@ -612,6 +641,41 @@ void TaskHeater1Control(void* pvParameters) {
       peak_temp = 0;
       has_reached_target = false;
       cycle_change_debounce = 0;
+      auto_low_temp_timer = 0;
+    }
+
+    if (auto_is_running && has_go_to) {
+      if (!isnan(ir1_temp) && ir1_temp < 40.0f) {
+        
+        if (auto_low_temp_timer == 0) {
+          auto_low_temp_timer = millis(); 
+        } 
+        else if (millis() - auto_low_temp_timer > 30000) {
+          
+          // สั่ง Stop การทำงาน
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            has_go_to = false;               
+            sysState.auto_was_started = false; 
+            sysState.auto_step = 0;        
+            
+            sysState.manual_was_started = false;
+            sysState.manual_preset_running = false;
+            
+            xSemaphoreGive(dataMutex);
+          }
+          
+          beep_mode = 3; 
+          beep_queue = 4; 
+
+          auto_low_temp_timer = 0; 
+        }
+      } else {
+        // ถ้าอุณหภูมิเกิน 40 หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
+        auto_low_temp_timer = 0; 
+      }
+    } else {
+      // ถ้าไม่ได้รัน Auto ก็รีเซ็ตเวลาทิ้ง
+      auto_low_temp_timer = 0;
     }
 
     // === Display Freeze Logic ===
@@ -677,12 +741,21 @@ void TaskHeater2Control(void* pvParameters) {
     float max_t = config.max_temps[HEATER_IDX];
 
     if (local_auto_running || local_preset_running) {
-        is_active = false;
-    } 
-    else if (!local_manual_started) {
-        is_active = false;
+      is_active = false;
+    } else if (!local_manual_started) {
+      is_active = false;
     }
-
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        xSemaphoreGive(dataMutex);
+      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
     bool cutoff_active = false;
@@ -800,14 +873,23 @@ void TaskHeater3Control(void* pvParameters) {
     bool is_active = config.heater_active[HEATER_IDX];
     float target_t = config.target_temps[HEATER_IDX];
     float max_t = config.max_temps[HEATER_IDX];
-    
-    if (local_auto_running || local_preset_running) {
-        is_active = false;
-    } 
-    else if (!local_manual_started) {
-        is_active = false;
-    }
 
+    if (local_auto_running || local_preset_running) {
+      is_active = false;
+    } else if (!local_manual_started) {
+      is_active = false;
+    }
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        xSemaphoreGive(dataMutex);
+      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
     bool cutoff_active = false;
@@ -945,7 +1027,7 @@ void TaskInput(void* pvParameters) {
 
             sysState.manual_preset_running = true;
             sysState.manual_was_started = true;
-            sysState.auto_was_started = false; 
+            sysState.auto_was_started = false;
             sysState.auto_step = 0;
             has_go_to = true;
           }
@@ -966,11 +1048,11 @@ void TaskInput(void* pvParameters) {
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
             // Button 0: Settings
             if (ui.getScreen() == SCREEN_SLEEP) {
-              ui.switchToStandby();  
+              ui.switchToStandby();
               ui.resetInactivityTimer();
               xSemaphoreGive(dataMutex);
               pcf_state.btn_pressed[i] = btn[i];
-              continue; 
+              continue;
             }
             if (i == 0) {
               UIScreen scr = ui.getScreen();
@@ -983,10 +1065,8 @@ void TaskInput(void* pvParameters) {
             // Button 1: Start/Stop
             else if (i == 1) {
               UIScreen current = ui.getScreen();
-              
-              bool isAnyRunning = sysState.manual_was_started || 
-                                  sysState.auto_was_started || 
-                                  sysState.manual_preset_running;
+
+              bool isAnyRunning = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
 
               if (isAnyRunning) {
                 // --- CASE: STOP ---
@@ -994,23 +1074,33 @@ void TaskInput(void* pvParameters) {
                 sysState.auto_was_started = false;
                 sysState.auto_step = 0;
                 sysState.manual_preset_running = false;
-                has_go_to = false; 
-                
+                has_go_to = false;
+
               } else {
-                // --- CASE: START ---
-                if (current == SCREEN_STANDBY) {
-                  sysState.manual_was_started = true;
-                  has_go_to = true;
-                  
-                } else if (current == SCREEN_AUTO_MODE) {
-                  sysState.auto_was_started = true;
-                  sysState.auto_step = 1;
-                  has_go_to = true;
-                  
-                } else if (current == SCREEN_MANUAL_MODE) {
-                  sysState.manual_preset_running = true;
-                  sysState.manual_preset_index = ui.getManualConfirmedPreset();
-                  has_go_to = true;
+                bool h1_fault = false;
+                if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+                    h1_fault = (sysState.tc_faults[0] != 0);
+                    xSemaphoreGive(dataMutex);
+                }
+                if (h1_fault) {
+                  beep_mode = 3;  // เสียง Alarm สั้นๆ หรือแบบเตือน
+                  beep_queue = 2;
+                } else {
+                  // --- CASE: START ---
+                  if (current == SCREEN_STANDBY) {
+                    sysState.manual_was_started = true;
+                    has_go_to = true;
+
+                  } else if (current == SCREEN_AUTO_MODE) {
+                    sysState.auto_was_started = true;
+                    sysState.auto_step = 1;
+                    has_go_to = true;
+
+                  } else if (current == SCREEN_MANUAL_MODE) {
+                    sysState.manual_preset_running = true;
+                    sysState.manual_preset_index = ui.getManualConfirmedPreset();
+                    has_go_to = true;
+                  }
                 }
               }
             }
@@ -1066,6 +1156,7 @@ void TaskDisplay(void* pvParameters) {
     AppState st;
     bool alarm_active = false;
     bool lock_active = false;
+    bool all_sensors_ok = true;
 
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       if (ui.checkInactivity(config, has_go_to, go_to)) {
@@ -1075,6 +1166,7 @@ void TaskDisplay(void* pvParameters) {
 
       for (int i = 0; i < 3; i++) {
         st.tc_temps[i] = sysState.displayed_temps[i];
+        if (isnan(st.tc_temps[i])) all_sensors_ok = false;
         st.tc_faults[i] = sysState.tc_faults[i];
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
         if (st.heater_cutoff_state[i]) {
@@ -1110,7 +1202,8 @@ void TaskDisplay(void* pvParameters) {
     } else {
       strcpy(st.ip_address, "---");
     }
-
+    
+    st.is_warning = alarm_active || (beep_mode == 3);
     st.is_heating_active = has_go_to;
     st.target_temp = go_to;
     st.temp_unit = config.temp_unit;
@@ -1124,8 +1217,10 @@ void TaskDisplay(void* pvParameters) {
       if (beep_queue == 0) beep_queue = 2;
     } else if (alarm_active) {
       if (beep_queue == 0) beep_queue = 2;
+    } else if (beep_mode == 3 && all_sensors_ok) {
+      beep_queue = 0;
+      beep_mode = 0;
     }
-
     freq_disp_cnt++;
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -1177,23 +1272,28 @@ void TaskSound(void* pvParameters) {
     if (beep_queue > 0) {
       int on_time = 60;
       int off_time = 100;
-      
-      if (beep_mode == 1) { on_time = 250; off_time = 250; } 
-      else if (beep_mode == 3) { on_time = 3000; off_time = 100; }
+
+      if (beep_mode == 1) {
+        on_time = 250;
+        off_time = 250;
+      } else if (beep_mode == 3) {
+        on_time = 3000;
+        off_time = 100;
+      }
 
       // --- ขับเสียงด้วย PWM (API v3.0+) ---
       if (config.sound_volume > 0) {
         int duty = map(config.sound_volume, 0, 100, 0, 128);
-        
+
         // แก้ไข: ส่งค่าไปที่ขา BUZZER โดยตรง (ไม่ต้องใส่ Channel แล้ว)
-        ledcWrite(BUZZER, duty); 
+        ledcWrite(BUZZER, duty);
       } else {
-        ledcWrite(BUZZER, 0); 
+        ledcWrite(BUZZER, 0);
       }
-      
+
       vTaskDelay(pdMS_TO_TICKS(on_time));
-      
-      ledcWrite(BUZZER, 0); // ปิดเสียง
+
+      ledcWrite(BUZZER, 0);  // ปิดเสียง
       vTaskDelay(pdMS_TO_TICKS(off_time));
 
       if (beep_queue >= 2) beep_queue -= 2;
@@ -1201,7 +1301,7 @@ void TaskSound(void* pvParameters) {
 
       if (beep_queue == 0) beep_mode = 0;
     } else {
-      ledcWrite(BUZZER, 0); // เงียบเมื่อไม่มีคิว
+      ledcWrite(BUZZER, 0);  // เงียบเมื่อไม่มีคิว
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
@@ -1305,7 +1405,7 @@ void setup() {
   pinMode(ENCODER_SW, INPUT_PULLUP);
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
-  
+
   max31855_init_pins();
   setup_encoder_fixed();
 
@@ -1487,8 +1587,8 @@ void setup_encoder_fixed() {
 }
 
 void setBrightness(uint8_t val) {
-    int duty = map(val, 0, 100, 0, 255);
-    analogWrite(TFT_BL, duty); 
+  int duty = map(val, 0, 100, 0, 255);
+  analogWrite(TFT_BL, duty);
 }
 
 void read_hardware_encoder(float* delta_out) {

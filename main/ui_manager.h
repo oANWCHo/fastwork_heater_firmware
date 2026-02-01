@@ -135,6 +135,7 @@ struct AppState {
   bool manual_was_started;
   uint8_t manual_preset_index;
   char ip_address[20];
+  bool is_warning;
 };
 
 enum QuickEditStep {

@@ -227,6 +227,12 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     }
   }
 
+  if (!_show_warning) {
+    if (state.is_warning) {
+      _show_warning = true;
+    }
+  }
+
   _spr.fillSprite(C_BLACK);
 
   switch (_current_screen) {
@@ -726,24 +732,28 @@ void UIManager::drawSettingsTempUnit(const AppState& state, const ConfigState& c
 
 void UIManager::drawSettingsSound(const AppState& state, const ConfigState& config) {
   drawHeader("Sound Volume");
-  _spr.setTextColor(TFT_WHITE, TFT_BLACK); _spr.setTextDatum(MC_DATUM); _spr.loadFont(Arial18);
+  _spr.setTextColor(TFT_WHITE, TFT_BLACK);
+  _spr.setTextDatum(MC_DATUM);
+  _spr.loadFont(Arial18);
 
   // วาด Bar Graph
   int bar_w = 200, bar_h = 20, x = (_spr.width() - bar_w) / 2, y = 90;
   _spr.drawRect(x, y, bar_w, bar_h, TFT_WHITE);
-  
+
   // คำนวณความยาวแท่งสี
   int fill_w = (int)((_temp_edit_value / 100.0f) * bar_w);
-  if (fill_w > 0) _spr.fillRect(x + 1, y + 1, fill_w - 2, bar_h - 2, TFT_CYAN); // สีฟ้า
+  if (fill_w > 0) _spr.fillRect(x + 1, y + 1, fill_w - 2, bar_h - 2, TFT_CYAN);  // สีฟ้า
 
-  char buf[30]; 
+  char buf[30];
   if (_temp_edit_value == 0) snprintf(buf, 30, "Mute (Off)");
   else snprintf(buf, 30, "Volume: %.0f%%", _temp_edit_value);
-  
+
   _spr.drawString(buf, _spr.width() / 2, y + 40);
 
   _spr.unloadFont();
-  _spr.setTextColor(TFT_YELLOW, TFT_BLACK); _spr.setTextDatum(BC_DATUM); _spr.setTextSize(1);
+  _spr.setTextColor(TFT_YELLOW, TFT_BLACK);
+  _spr.setTextDatum(BC_DATUM);
+  _spr.setTextSize(1);
   _spr.drawString("Rot: Adjust | Press: Save", _spr.width() / 2, _spr.height() - 10);
 }
 
@@ -1022,7 +1032,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
           break;
         case MENU_PAGE2_SOUND:
           _current_screen = SCREEN_SETTINGS_SOUND;
-          _temp_edit_value = (float)config.sound_volume; // โหลดค่า Volume ปัจจุบันมาแก้ไข
+          _temp_edit_value = (float)config.sound_volume;  // โหลดค่า Volume ปัจจุบันมาแก้ไข
           break;
         case MENU_PAGE2_TEMP_UNIT:
           _current_screen = SCREEN_SETTINGS_TEMP_UNIT;
@@ -1213,10 +1223,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_SOUND:
-      config.sound_volume = (uint8_t)_temp_edit_value; // บันทึกค่าความดัง
+      config.sound_volume = (uint8_t)_temp_edit_value;  // บันทึกค่าความดัง
       if (_save_callback) _save_callback(config);
       _current_screen = SCREEN_SETTINGS_PAGE_2;
-      _menu_step_accumulator = 0.0f; // Reset accumulator
+      _menu_step_accumulator = 0.0f;  // Reset accumulator
       return true;
     case SCREEN_SETTINGS_STARTUP:
       config.startup_mode = (StartupMode)_selected_menu_item;
@@ -1543,12 +1553,13 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         _selected_menu_item = new_pos;
         break;
       }
-    case SCREEN_SETTINGS_SOUND: {
-        _temp_edit_value += (float)change * 5.0f; // ปรับทีละ 5%
+    case SCREEN_SETTINGS_SOUND:
+      {
+        _temp_edit_value += (float)change * 5.0f;  // ปรับทีละ 5%
         if (_temp_edit_value < 0) _temp_edit_value = 0;
         if (_temp_edit_value > 100) _temp_edit_value = 100;
         break;
-    }
+      }
     case SCREEN_SETTINGS_TEMP_UNIT:
       {
         int new_pos = _selected_menu_item + change;
@@ -1703,9 +1714,11 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   _spr.setTextDatum(ML_DATUM);
   char ir_buf[30];
   if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit);
+  else if (state.ir_temps[0] < 0) snprintf(ir_buf, 30, "IR1 : stb");
   else snprintf(ir_buf, 30, "IR1 : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h / 4) + 2);
   if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit);
+  else if (state.ir_temps[1] < 0) snprintf(ir_buf, 30, "IR2 : stb");
   else snprintf(ir_buf, 30, "IR2 : %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h * 3 / 4) - 1);
   _spr.unloadFont();
@@ -1789,7 +1802,11 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     } else {
       _spr.drawString("Status", x + (cycle_box_w / 2), status_y_label);
       _spr.loadFont(Arial18);
-      if (isOtherModeRunning) {
+      if (state.tc_faults[0]) {
+        // ถ้า Heater 1 มีปัญหา ให้ขึ้น H1 OFF สีแดง
+        _spr.setTextColor(TFT_RED, bg_color);
+        _spr.drawString("H1 OFF", x + (cycle_box_w / 2), status_y_val);
+      } else if (isOtherModeRunning) {
         _spr.setTextColor(C_GREY_TXT, bg_color);
         _spr.drawString("In-use", x + (cycle_box_w / 2), status_y_val);
       } else if (isLocked) {
@@ -1820,9 +1837,11 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   _spr.setTextDatum(ML_DATUM);
   char ir_buf[30];
   if (isnan(state.ir_temps[0])) snprintf(ir_buf, 30, "IR1 : ---%c", state.temp_unit);
+  else if (state.ir_temps[0] < 0) snprintf(ir_buf, 30, "IR1 : stb");
   else snprintf(ir_buf, 30, "IR1 : %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h / 4) + 2);
   if (isnan(state.ir_temps[1])) snprintf(ir_buf, 30, "IR2 : ---%c", state.temp_unit);
+  else if (state.ir_temps[1] < 0) snprintf(ir_buf, 30, "IR2 : stb");
   else snprintf(ir_buf, 30, "IR2 : %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit);
   _spr.drawString(ir_buf, gap + 10, sensor_y + (sensor_h * 3 / 4) - 1);
   _spr.unloadFont();
@@ -1921,7 +1940,10 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   _spr.loadFont(Arial18);
   const char* status_text = "---";
   uint16_t status_color = C_GREY_TXT;
-  if (isOtherModeRunning) {
+  if (state.tc_faults[0]) {
+    status_text = "H1 OFF";
+    status_color = TFT_RED;
+  } else if (isOtherModeRunning) {
     status_text = "In-use";
     status_color = C_GREY_TXT;
   } else if (activePresetIdx >= 0) {
@@ -1953,9 +1975,11 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   _spr.setTextColor(C_BLACK, C_PINK_BG);
   _spr.setTextDatum(ML_DATUM);
   if (isnan(state.ir_temps[0])) snprintf(buf, 30, "IR1: ---%c", state.temp_unit);
+  else if (state.ir_temps[0] < 0) snprintf(buf, 30, "IR1: stb");
   else snprintf(buf, 30, "IR1: %.0f%c", convertTemp(state.ir_temps[0], state.temp_unit), state.temp_unit);
   _spr.drawString(buf, gap + 5, sensor_y + 12);
   if (isnan(state.ir_temps[1])) snprintf(buf, 30, "IR2: ---%c", state.temp_unit);
+  else if (state.ir_temps[1] < 0) snprintf(buf, 30, "IR2: stb");
   else snprintf(buf, 30, "IR2: %.0f%c", convertTemp(state.ir_temps[1], state.temp_unit), state.temp_unit);
   _spr.drawString(buf, gap + 5, sensor_y + sensor_h - 12);
   _spr.unloadFont();
