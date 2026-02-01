@@ -174,7 +174,8 @@ void loadConfig(ConfigState& cfg);
 void tpo_set_percent(int index, float percent);
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity, float sensor_emissivity = 0.95f);
 void setupWebServer();
-
+void setBrightness(uint8_t val);
+WiFiConnectionStatus getWiFiStatus();
 // Add specific helper functions
 const char* getWiFiSSID() {
   if (config.wifi_config.use_custom && strlen(config.wifi_config.ssid) > 0) {
@@ -1449,67 +1450,600 @@ void loop() {
 
 // ========== [WiFi & Web Server Functions] ==========
 void setupWebServer() {
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    String html = "<!DOCTYPE html><html><head>";
-    html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-    html += "<title>Smart Heater</title>";
-    html += "<style>";
-    html += "body{font-family:Arial;margin:20px;background:#1a1a2e;color:#eee}";
-    html += "h2{color:#0ff}";
-    html += ".val{color:#0f0;font-weight:bold}";
-    html += ".warn{color:#f80}";
-    html += ".err{color:#f00}";
-    html += "table{width:100%;border-collapse:collapse}";
-    html += "th,td{padding:8px;text-align:left;border:1px solid #444}";
-    html += "th{background:#333}";
-    html += "button{padding:10px 20px;margin:5px;cursor:pointer}";
-    html += "</style></head><body>";
-    html += "<h2>Smart Heater Status</h2>";
-
-    html += "<h3>WiFi Status</h3>";
-    html += "<p>Signal Strength: <span class='val'>" + String(wifiSignalStrength) + " dBm</span></p>";
-    html += "<p>IP: <span class='val'>" + WiFi.localIP().toString() + "</span></p>";
-
-    float tcs[3] = { 0 }, irs[2] = { 0 };
-    bool manual_started = false, auto_started = false;
-    uint8_t a_step = 0;
-
+  
+  // ========== [1. JSON API ENDPOINT - For 1-second updates] ==========
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String json = "{";
+    
+    float tcs[3] = {0}, irs[2] = {0}, ir_amb[2] = {0};
+    float displayed[3] = {0};
+    float probe_temp = 0, probe_peak = 0;
+    uint8_t faults[3] = {0};
+    bool cutoff[3] = {false}, ready[3] = {false};
+    bool manual_started = false, auto_started = false, preset_running = false;
+    uint8_t a_step = 0, preset_idx = 0;
+    uint32_t on_ticks[3] = {0};
+    
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      for (int i = 0; i < 3; i++) tcs[i] = sysState.tc_temps[i];
-      for (int i = 0; i < 2; i++) irs[i] = sysState.ir_temps[i];
+      for (int i = 0; i < 3; i++) {
+        tcs[i] = sysState.tc_temps[i];
+        displayed[i] = sysState.displayed_temps[i];
+        faults[i] = sysState.tc_faults[i];
+        cutoff[i] = sysState.heater_cutoff[i];
+        ready[i] = sysState.heater_ready[i];
+      }
+      for (int i = 0; i < 2; i++) {
+        irs[i] = sysState.ir_temps[i];
+        ir_amb[i] = sysState.ir_ambient[i];
+      }
+      probe_temp = sysState.tc_probe_temp;
+      probe_peak = sysState.tc_probe_peak;
       manual_started = sysState.manual_was_started;
       auto_started = sysState.auto_was_started;
+      preset_running = sysState.manual_preset_running;
+      preset_idx = sysState.manual_preset_index;
       a_step = sysState.auto_step;
       xSemaphoreGive(dataMutex);
     }
-
-    html += "<hr><h3>Temperature Readings</h3>";
-    html += "<table>";
-    html += "<tr><th>Sensor</th><th>Value</th></tr>";
+    
+    // Get TPO on_ticks for heater power %
+    portENTER_CRITICAL(&tpoMux);
+    for (int i = 0; i < 3; i++) on_ticks[i] = tpo_on_ticks[i];
+    uint32_t window = tpo_window_period_ticks;
+    portEXIT_CRITICAL(&tpoMux);
+    
+    // Calculate power percentages
+    float power[3];
     for (int i = 0; i < 3; i++) {
-      html += "<tr><td>TC" + String(i + 1) + "</td>";
-      html += "<td class='val'>" + String(tcs[i], 1) + " &deg;C</td></tr>";
+      power[i] = (window > 0) ? (on_ticks[i] * 100.0f / window) : 0;
     }
+    
+    // Determine current mode
+    String mode = "STANDBY";
+    if (has_go_to) {
+      if (auto_started && a_step > 0) {
+        mode = "AUTO_CYCLE_" + String(a_step);
+      } else if (preset_running) {
+        mode = "PRESET_" + String(preset_idx + 1);
+      } else if (manual_started) {
+        mode = "MANUAL";
+      }
+    }
+    
+    // Build JSON
+    json += "\"mode\":\"" + mode + "\",";
+    json += "\"timestamp\":" + String(millis()) + ",";
+    
+    // Temperatures
+    json += "\"temperatures\":{";
+    json += "\"tc\":[";
+    for (int i = 0; i < 3; i++) {
+      json += isnan(tcs[i]) ? "null" : String(tcs[i], 1);
+      if (i < 2) json += ",";
+    }
+    json += "],\"displayed\":[";
+    for (int i = 0; i < 3; i++) {
+      json += isnan(displayed[i]) ? "null" : String(displayed[i], 1);
+      if (i < 2) json += ",";
+    }
+    json += "],\"ir\":[";
     for (int i = 0; i < 2; i++) {
-      html += "<tr><td>IR" + String(i + 1) + "</td>";
-      html += "<td class='val'>" + String(irs[i], 1) + " &deg;C</td></tr>";
+      json += isnan(irs[i]) ? "null" : String(irs[i], 1);
+      if (i < 1) json += ",";
     }
-    html += "</table>";
-    html += "<hr><h3>System Status</h3>";
-    html += "<p>Manual Started: <span class='" + String(manual_started ? "val" : "warn") + "'>";
-    html += String(manual_started ? "YES" : "NO") + "</span></p>";
-    html += "<p>Auto Started: <span class='" + String(auto_started ? "val" : "warn") + "'>";
-    html += String(auto_started ? "YES" : "NO") + "</span></p>";
-    html += "<p>Auto Step: " + String(a_step) + "</p>";
-    html += "<br><a href='/update'><button>OTA Update</button></a>";
-    html += "</body></html>";
+    json += "],\"ir_ambient\":[";
+    for (int i = 0; i < 2; i++) {
+      json += isnan(ir_amb[i]) ? "null" : String(ir_amb[i], 1);
+      if (i < 1) json += ",";
+    }
+    json += "],\"probe\":" + (isnan(probe_temp) ? String("null") : String(probe_temp, 1));
+    json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
+    json += "},";
+    
+    // Heaters status
+    json += "\"heaters\":[";
+    for (int i = 0; i < 3; i++) {
+      json += "{";
+      json += "\"active\":" + String(config.heater_active[i] ? "true" : "false") + ",";
+      json += "\"target\":" + String(config.target_temps[i], 1) + ",";
+      json += "\"max\":" + String(config.max_temps[i], 1) + ",";
+      json += "\"power\":" + String(power[i], 1) + ",";
+      json += "\"cutoff\":" + String(cutoff[i] ? "true" : "false") + ",";
+      json += "\"ready\":" + String(ready[i] ? "true" : "false") + ",";
+      json += "\"fault\":" + String(faults[i]);
+      json += "}";
+      if (i < 2) json += ",";
+    }
+    json += "],";
+    
+    // Warnings
+    json += "\"warnings\":[";
+    bool first_warn = true;
+    for (int i = 0; i < 3; i++) {
+      if (faults[i]) {
+        if (!first_warn) json += ",";
+        json += "\"TC" + String(i+1) + " FAULT\"";
+        first_warn = false;
+      }
+      if (cutoff[i]) {
+        if (!first_warn) json += ",";
+        json += "\"Heater " + String(i+1) + " CUTOFF\"";
+        first_warn = false;
+      }
+    }
+    json += "],";
+    
+    // WiFi
+    json += "\"wifi\":{";
+    json += "\"rssi\":" + String(wifiSignalStrength) + ",";
+    json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += "}";
+    
+    json += "}";
+    
+    request->send(200, "application/json", json);
+  });
 
+  // ========== [2. MAIN DASHBOARD PAGE] ==========
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Smart Heater Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: 'Segoe UI', Arial, sans-serif; 
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee; 
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { 
+      text-align: center; 
+      color: #0ff; 
+      margin-bottom: 20px;
+      text-shadow: 0 0 10px rgba(0,255,255,0.5);
+    }
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0,0,0,0.3);
+      padding: 10px 20px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .mode-badge {
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-weight: bold;
+      font-size: 1.1em;
+    }
+    .mode-STANDBY { background: #666; }
+    .mode-MANUAL { background: #2ecc71; }
+    .mode-AUTO { background: #e74c3c; }
+    .mode-PRESET { background: #f39c12; }
+    
+    .grid { 
+      display: grid; 
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+      gap: 20px; 
+      margin-bottom: 20px;
+    }
+    .card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 15px;
+      padding: 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .card h3 { 
+      color: #0ff; 
+      margin-bottom: 15px;
+      border-bottom: 1px solid rgba(0,255,255,0.3);
+      padding-bottom: 10px;
+    }
+    
+    .heater-card {
+      position: relative;
+      overflow: hidden;
+    }
+    .heater-card.active { border-color: #2ecc71; }
+    .heater-card.fault { border-color: #e74c3c; animation: pulse-red 1s infinite; }
+    .heater-card.cutoff { border-color: #f39c12; }
+    .heater-card.ready { border-color: #2ecc71; box-shadow: 0 0 20px rgba(46,204,113,0.3); }
+    
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 5px rgba(231,76,60,0.5); }
+      50% { box-shadow: 0 0 20px rgba(231,76,60,0.8); }
+    }
+    
+    .temp-display {
+      font-size: 2.5em;
+      font-weight: bold;
+      text-align: center;
+      padding: 15px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      margin: 10px 0;
+    }
+    .temp-display.fault { color: #e74c3c; }
+    .temp-display.normal { color: #2ecc71; }
+    .temp-display.hot { color: #f39c12; }
+    
+    .power-bar {
+      height: 20px;
+      background: #333;
+      border-radius: 10px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .power-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #2ecc71, #f39c12, #e74c3c);
+      transition: width 0.3s ease;
+    }
+    
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .info-label { color: #888; }
+    .info-value { font-weight: bold; }
+    .info-value.ok { color: #2ecc71; }
+    .info-value.warn { color: #f39c12; }
+    .info-value.err { color: #e74c3c; }
+    
+    .warnings-panel {
+      background: rgba(231,76,60,0.2);
+      border: 1px solid #e74c3c;
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 20px;
+      display: none;
+    }
+    .warnings-panel.visible { display: block; }
+    .warnings-panel h3 { color: #e74c3c; }
+    .warning-item {
+      padding: 8px;
+      margin: 5px 0;
+      background: rgba(231,76,60,0.3);
+      border-radius: 5px;
+    }
+    
+    #chart-container {
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 15px;
+      height: 300px;
+    }
+    
+    .footer {
+      text-align: center;
+      margin-top: 20px;
+      color: #666;
+    }
+    .footer a {
+      color: #0ff;
+      text-decoration: none;
+      margin: 0 10px;
+    }
+    
+    .update-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #2ecc71;
+      display: inline-block;
+      margin-right: 5px;
+    }
+    .update-indicator.updating { animation: blink 0.5s infinite; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Heater Dashboard</h1>
+    
+    <div class="status-bar">
+      <div>
+        <span class="update-indicator" id="updateIndicator"></span>
+        <span id="lastUpdate">Connecting...</span>
+      </div>
+      <div id="modeDisplay" class="mode-badge mode-STANDBY">STANDBY</div>
+      <div>WiFi: <span id="wifiRssi">--</span> dBm</div>
+    </div>
+    
+    <div class="warnings-panel" id="warningsPanel">
+      <h3>⚠️ Warnings</h3>
+      <div id="warningsList"></div>
+    </div>
+    
+    <div class="grid">
+      <!-- Heater 1 -->
+      <div class="card heater-card" id="heater1">
+        <h3>Heater 1 (Main)</h3>
+        <div class="temp-display" id="temp1">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target1">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max1">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power1">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar1" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status1">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- Heater 2 -->
+      <div class="card heater-card" id="heater2">
+        <h3>Heater 2</h3>
+        <div class="temp-display" id="temp2">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target2">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max2">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power2">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar2" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status2">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- Heater 3 -->
+      <div class="card heater-card" id="heater3">
+        <h3>Heater 3</h3>
+        <div class="temp-display" id="temp3">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target3">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max3">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power3">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar3" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status3">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- IR Sensors -->
+      <div class="card">
+        <h3>IR Sensors</h3>
+        <div class="info-row">
+          <span class="info-label">IR1 Object</span>
+          <span class="info-value" id="ir1">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR1 Ambient</span>
+          <span class="info-value" id="ir1amb">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR2 Object</span>
+          <span class="info-value" id="ir2">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR2 Ambient</span>
+          <span class="info-value" id="ir2amb">-- °C</span>
+        </div>
+        <div class="info-row" style="margin-top:15px; border-top: 2px solid #0ff; padding-top:10px;">
+          <span class="info-label">Wire Probe</span>
+          <span class="info-value" id="probe">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Probe Peak</span>
+          <span class="info-value" id="probePeak">-- °C</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Temperature Chart -->
+    <div class="card">
+      <h3>📈 Temperature History (Last 60 seconds)</h3>
+      <div id="chart-container">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <a href="/update">🔄 OTA Update</a>
+      <span>|</span>
+      <span>IP: <span id="ipAddr">--</span></span>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    // Chart setup
+    const ctx = document.getElementById('tempChart').getContext('2d');
+    const maxDataPoints = 60;
+    const chartData = {
+      labels: [],
+      datasets: [
+        { label: 'TC1', data: [], borderColor: '#e74c3c', fill: false, tension: 0.3 },
+        { label: 'TC2', data: [], borderColor: '#2ecc71', fill: false, tension: 0.3 },
+        { label: 'TC3', data: [], borderColor: '#3498db', fill: false, tension: 0.3 },
+        { label: 'IR1', data: [], borderColor: '#f39c12', fill: false, tension: 0.3, borderDash: [5,5] },
+        { label: 'IR2', data: [], borderColor: '#9b59b6', fill: false, tension: 0.3, borderDash: [5,5] }
+      ]
+    };
+    
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: chartData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 0 },
+        scales: {
+          y: { 
+            beginAtZero: false,
+            grid: { color: 'rgba(255,255,255,0.1)' },
+            ticks: { color: '#888' }
+          },
+          x: { 
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#888', maxTicksLimit: 10 }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#eee' } }
+        }
+      }
+    });
+    
+    function addChartData(tc, ir) {
+      const now = new Date().toLocaleTimeString();
+      chartData.labels.push(now);
+      chartData.datasets[0].data.push(tc[0]);
+      chartData.datasets[1].data.push(tc[1]);
+      chartData.datasets[2].data.push(tc[2]);
+      chartData.datasets[3].data.push(ir[0]);
+      chartData.datasets[4].data.push(ir[1]);
+      
+      if (chartData.labels.length > maxDataPoints) {
+        chartData.labels.shift();
+        chartData.datasets.forEach(ds => ds.data.shift());
+      }
+      chart.update('none');
+    }
+    
+    function updateDashboard(data) {
+      // Update mode
+      const modeEl = document.getElementById('modeDisplay');
+      modeEl.textContent = data.mode;
+      modeEl.className = 'mode-badge';
+      if (data.mode.includes('AUTO')) modeEl.classList.add('mode-AUTO');
+      else if (data.mode.includes('PRESET')) modeEl.classList.add('mode-PRESET');
+      else if (data.mode === 'MANUAL') modeEl.classList.add('mode-MANUAL');
+      else modeEl.classList.add('mode-STANDBY');
+      
+      // Update heaters
+      data.heaters.forEach((h, i) => {
+        const idx = i + 1;
+        const card = document.getElementById('heater' + idx);
+        const tempEl = document.getElementById('temp' + idx);
+        
+        // Temperature
+        const temp = data.temperatures.tc[i];
+        tempEl.textContent = (temp !== null) ? temp.toFixed(1) + ' °C' : 'FAULT';
+        tempEl.className = 'temp-display';
+        if (h.fault) tempEl.classList.add('fault');
+        else if (temp > h.max * 0.9) tempEl.classList.add('hot');
+        else tempEl.classList.add('normal');
+        
+        // Card status
+        card.className = 'card heater-card';
+        if (h.fault) card.classList.add('fault');
+        else if (h.cutoff) card.classList.add('cutoff');
+        else if (h.ready) card.classList.add('ready');
+        else if (h.active) card.classList.add('active');
+        
+        // Info
+        document.getElementById('target' + idx).textContent = h.target.toFixed(1) + ' °C';
+        document.getElementById('max' + idx).textContent = h.max.toFixed(1) + ' °C';
+        document.getElementById('power' + idx).textContent = h.power.toFixed(0) + '%';
+        document.getElementById('powerBar' + idx).style.width = h.power + '%';
+        
+        // Status text
+        const statusEl = document.getElementById('status' + idx);
+        if (h.fault) { statusEl.textContent = 'FAULT'; statusEl.className = 'info-value err'; }
+        else if (h.cutoff) { statusEl.textContent = 'CUTOFF'; statusEl.className = 'info-value warn'; }
+        else if (h.ready) { statusEl.textContent = 'READY'; statusEl.className = 'info-value ok'; }
+        else if (h.active && h.power > 0) { statusEl.textContent = 'Heating'; statusEl.className = 'info-value warn'; }
+        else if (h.active) { statusEl.textContent = 'Active'; statusEl.className = 'info-value ok'; }
+        else { statusEl.textContent = 'Inactive'; statusEl.className = 'info-value'; }
+      });
+      
+      // IR sensors
+      document.getElementById('ir1').textContent = (data.temperatures.ir[0] !== null) ? data.temperatures.ir[0].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir2').textContent = (data.temperatures.ir[1] !== null) ? data.temperatures.ir[1].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir1amb').textContent = (data.temperatures.ir_ambient[0] !== null) ? data.temperatures.ir_ambient[0].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir2amb').textContent = (data.temperatures.ir_ambient[1] !== null) ? data.temperatures.ir_ambient[1].toFixed(1) + ' °C' : '--';
+      document.getElementById('probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(1) + ' °C' : '--';
+      document.getElementById('probePeak').textContent = (data.temperatures.probe_peak !== null) ? data.temperatures.probe_peak.toFixed(1) + ' °C' : '--';
+      
+      // WiFi
+      document.getElementById('wifiRssi').textContent = data.wifi.rssi;
+      document.getElementById('ipAddr').textContent = data.wifi.ip;
+      
+      // Warnings
+      const warnPanel = document.getElementById('warningsPanel');
+      const warnList = document.getElementById('warningsList');
+      if (data.warnings.length > 0) {
+        warnPanel.classList.add('visible');
+        warnList.innerHTML = data.warnings.map(w => '<div class="warning-item">⚠️ ' + w + '</div>').join('');
+      } else {
+        warnPanel.classList.remove('visible');
+      }
+      
+      // Add to chart
+      addChartData(data.temperatures.tc, data.temperatures.ir);
+      
+      // Update timestamp
+      document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+    }
+    
+    function fetchData() {
+      const indicator = document.getElementById('updateIndicator');
+      indicator.classList.add('updating');
+      
+      fetch('/api/status')
+        .then(res => res.json())
+        .then(data => {
+          updateDashboard(data);
+          indicator.classList.remove('updating');
+        })
+        .catch(err => {
+          console.error('Fetch error:', err);
+          document.getElementById('lastUpdate').textContent = 'Connection lost...';
+          indicator.classList.remove('updating');
+        });
+    }
+    
+    // Initial fetch and start interval
+    fetchData();
+    setInterval(fetchData, 1000); // Update every 1 second
+  </script>
+</body>
+</html>
+)rawliteral";
+    
     request->send(200, "text/html", html);
   });
 
+  // Start OTA and server
   ElegantOTA.begin(&server);
   server.begin();
-  Serial.println("[WiFi] HTTP Server Started");
+  Serial.println("[WiFi] HTTP Server Started with Dashboard");
 }
 
 WiFiConnectionStatus getWiFiStatus() {
