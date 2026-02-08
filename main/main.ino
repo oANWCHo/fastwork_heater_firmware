@@ -1,8 +1,3 @@
-/**
- * Merged Smart Heater Firmware
- * Combined functionalities of main.ino (Logic) and main_modified.ino (Non-blocking WiFi)
- */
-
 #include <Arduino.h>
 #include <SPI.h>
 #include <Wire.h>
@@ -33,6 +28,7 @@
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
 #define MAXCS4 18  // CS4
+#define TFT_BL 38
 
 #define ENCODER_A 6
 #define ENCODER_B 7
@@ -41,7 +37,11 @@
 #define SDA_PIN 4
 #define SCL_PIN 5
 #define BUZZER 41
+#define BUZZER_CHANNEL 2  // ใช้ Channel 2 (จะได้ไม่ชนกับ Backlight ที่มักใช้ 0 หรือ 1)
+#define BUZZER_FREQ 2700
+#define BUZZER_RES 8  // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
+#define PCF_INT 21
 
 #define IR1_ADDR 0x10
 #define IR2_ADDR 0x11
@@ -59,7 +59,7 @@
 
 // ========== [Auto Mode Control Sensor Selection] ==========
 // 0 = Thermocouple, 1 = IR1
-#define AUTO_CONTROL_SENSOR 1 
+#define AUTO_CONTROL_SENSOR 1
 
 // ========== [WiFi Configuration] ==========
 const char* ssid = "NNTT24";
@@ -75,8 +75,8 @@ volatile WiFiConnectionStatus wifiStatus = WIFI_STATUS_DISCONNECTED;
 volatile int wifiSignalStrength = 0;
 
 // WiFi Config
-#define WIFI_RECONNECT_INTERVAL_MS 30000   
-#define WIFI_CHECK_INTERVAL_MS 5000        
+#define WIFI_RECONNECT_INTERVAL_MS 30000
+#define WIFI_CHECK_INTERVAL_MS 5000
 
 // ========== [Shared Resources] ==========
 SemaphoreHandle_t spiMutex;
@@ -94,10 +94,10 @@ struct SharedData {
   float ir_temps[2];
   float ir_ambient[2];
   bool heater_cutoff[3];
-  bool heater_ready[3]; // True if stable for 10s
-  uint8_t auto_step;    // 0=Off, 1=Cycle1, 2=Cycle2, 3=Cycle3
+  bool heater_ready[3];  // True if stable for 10s
+  uint8_t auto_step;     // 0=Off, 1=Cycle1, 2=Cycle2, 3=Cycle3
   bool auto_mode_enabled;
-  bool auto_was_started;        
+  bool auto_was_started;
   bool manual_was_started;
   bool manual_preset_running;
   uint8_t manual_preset_index;  // 0-2
@@ -143,9 +143,9 @@ AsyncWebServer server(80);
 bool serverStarted = false;
 
 // ========== [PID Vars] ==========
-float Kp[3] = { 1.2f, 2.5f, 0.5f };
-float Ki[3] = { 0.02f, 0.5f, 0.01f };
-float Kd[3] = { 0.2f, 0.01f, 0.8f };
+float Kp[3] = { 1.2f, 1.2f, 1.2f };
+float Ki[3] = { 0.02f, 0.02f, 0.02f };
+float Kd[3] = { 0.2f, 0.2f, 0.2f };
 float pid_integral[3] = { 0.0f, 0.0f, 0.0f };
 float pid_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 uint32_t pid_last_time[3] = { 0, 0, 0 };
@@ -173,8 +173,9 @@ void max31855_init_pins();
 void loadConfig(ConfigState& cfg);
 void tpo_set_percent(int index, float percent);
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity, float sensor_emissivity = 0.95f);
-void setupWebServer(); 
-
+void setupWebServer();
+void setBrightness(uint8_t val);
+WiFiConnectionStatus getWiFiStatus();
 // Add specific helper functions
 const char* getWiFiSSID() {
   if (config.wifi_config.use_custom && strlen(config.wifi_config.ssid) > 0) {
@@ -205,15 +206,15 @@ void TaskWiFiManager(void* pvParameters) {
   const TickType_t xCheckInterval = pdMS_TO_TICKS(WIFI_CHECK_INTERVAL_MS);
   uint32_t lastReconnectAttempt = 0;
   bool wasConnected = false;
-  
+
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  
+
   Serial.println("[WiFi] Starting initial connection attempt...");
   // WiFi.begin(ssid, password);
   WiFi.begin(getWiFiSSID(), getWiFiPassword());
   wifiStatus = WIFI_STATUS_CONNECTING;
-  
+
   for (;;) {
     wl_status_t currentStatus = WiFi.status();
     switch (currentStatus) {
@@ -232,7 +233,7 @@ void TaskWiFiManager(void* pvParameters) {
         }
         wifiSignalStrength = WiFi.RSSI();
         break;
-        
+
       case WL_DISCONNECTED:
       case WL_CONNECTION_LOST:
       case WL_CONNECT_FAILED:
@@ -242,7 +243,7 @@ void TaskWiFiManager(void* pvParameters) {
         }
         wifiStatus = WIFI_STATUS_DISCONNECTED;
         wifiSignalStrength = 0;
-        
+
         if (millis() - lastReconnectAttempt > WIFI_RECONNECT_INTERVAL_MS) {
           Serial.println("[WiFi] Attempting to reconnect...");
           wifiStatus = WIFI_STATUS_CONNECTING;
@@ -357,13 +358,34 @@ void TaskMAX(void* pvParameters) {
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
-          if (final_temp < 25.0f) final_temp = 25.0f;
+          if (final_temp < 0.0f) final_temp = 0.0f;
         }
 
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
           if (i < 3) {
             sysState.tc_temps[i] = final_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
+            if (is_fault) {
+              // 1. สั่งปิด Heater ตัวที่เสีย (เอาติ๊กถูกออก)
+              config.heater_active[i] = false;
+
+              // 2. ถ้าเป็น Heater 1 (Main) ให้สั่งหยุด Auto และ Preset ทันที
+              if (i == 0) {
+                sysState.auto_was_started = false;       // ปิด Auto Mode
+                sysState.manual_preset_running = false;  // ปิด Manual Preset
+                sysState.auto_step = 0;
+
+                // 3. ถ้าเครื่องกำลังรันอยู่ ให้ Force Stop และร้องเตือน
+                if (has_go_to) {
+                  has_go_to = false;                    // สั่ง Stop
+                  sysState.manual_was_started = false;  // ปิด Manual (Standby run)
+
+                  // สั่งร้องเตือน (Alarm)
+                  beep_mode = 3;
+                  beep_queue = 10;
+                }
+              }
+            }
           } else {
             if (isnan(final_temp)) {
               sysState.tc_probe_temp = NAN;
@@ -407,37 +429,49 @@ void TaskMLX(void* pvParameters) {
   }
 }
 
-// 3. CONTROL TASK (High Priority)
-void TaskControl(void* pvParameters) {
+
+// ========== [HEATER CONTROL TASKS - Separated into 3 tasks] ==========
+
+// Shared state for auto mode cycle control (only used by Heater 1)
+static volatile uint32_t cycle_change_debounce = 0;
+
+// Wire probe peak tracking (shared, updated by Heater 1 task)
+static volatile float wire_max_tracker = -999.0f;
+static volatile uint32_t wire_max_timer = 0;
+
+// Constants shared by all heater tasks
+const float READY_THRESHOLD = 5.0f;
+const uint32_t READY_HOLD_MS = 5000;
+
+// 3a. HEATER 1 CONTROL TASK (Main Heater - handles auto mode)
+void TaskHeater1Control(void* pvParameters) {
+  const int HEATER_IDX = 0;
   const TickType_t xFrequency = pdMS_TO_TICKS(50);
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  static float ready_stable_start[3] = { 0, 0, 0 };
-  const float READY_THRESHOLD = 5.0f;
-  const uint32_t READY_HOLD_MS = 5000;
-  static uint8_t current_auto_step = 0;
 
-  static float peak_temp[3] = { 0, 0, 0 };
-  static bool has_reached_target[3] = { false, false, false };
-  static uint32_t cycle_change_debounce = 0;
-  static uint32_t snapshot_timer[3] = { 0, 0, 0 };
-  static float last_displayed_val[3] = { 0, 0, 0 };
-  static float wire_max_tracker = -999.0f;
-  static uint32_t wire_max_timer = 0;
-  static float wire_max_display = 0.0f;
-  static bool prev_ready_state[3] = { false, false, false };
+  // Local state for this heater
+  float ready_stable_start = 0;
+  float peak_temp = 0;
+  bool has_reached_target = false;
+  uint32_t snapshot_timer = 0;
+  float last_displayed_val = 0;
+  bool prev_ready_state = false;
+
+  uint32_t auto_low_temp_timer = 0;
 
   for (;;) {
-    float current_temps[3];
+    float current_t = NAN;
     float ir1_temp = NAN;
     float current_wire_temp = NAN;
-
+    uint8_t current_auto_step = 0;
     bool local_auto_started = false;
     bool local_manual_started = false;
     bool local_manual_preset_running = false;
     uint8_t local_preset_idx = 0;
 
+    // Read shared data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-      for (int i = 0; i < 3; i++) current_temps[i] = sysState.tc_temps[i];
+      current_t = sysState.tc_temps[HEATER_IDX];
       ir1_temp = sysState.ir_temps[0];
       current_auto_step = sysState.auto_step;
       current_wire_temp = sysState.tc_probe_temp;
@@ -448,14 +482,14 @@ void TaskControl(void* pvParameters) {
       xSemaphoreGive(dataMutex);
     }
 
+    // Wire probe peak tracking (Heater 1 handles this)
     if (!isnan(current_wire_temp)) {
       if (current_wire_temp > wire_max_tracker) {
         wire_max_tracker = current_wire_temp;
       }
     }
-
     if (millis() - wire_max_timer > 5000) {
-      wire_max_display = wire_max_tracker;
+      float wire_max_display = wire_max_tracker;
       wire_max_tracker = -999.0f;
       wire_max_timer = millis();
       if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
@@ -467,167 +501,479 @@ void TaskControl(void* pvParameters) {
     bool auto_is_running = (local_auto_started && current_auto_step > 0);
     bool system_run = has_go_to;
 
-    for (int i = 0; i < 3; i++) {
-      float current_t = current_temps[i];
-      bool is_active = config.heater_active[i];
-      float target_t = config.target_temps[i];
-      float max_t = config.max_temps[i];
+    bool is_active = config.heater_active[HEATER_IDX];
+    float target_t = config.target_temps[HEATER_IDX];
+    float max_t = config.max_temps[HEATER_IDX];
+    bool is_auto_controlled = false;
 
-      bool is_auto_controlled = false;
-      // 1. AUTO MODE OVERRIDE
-      if (i == MAIN_HEATER_INDEX && auto_is_running) {
-        is_active = true;
-        is_auto_controlled = true;
-        int cycle_idx = current_auto_step - 1;
-        target_t = config.auto_target_temps[cycle_idx];
-        max_t = config.auto_max_temps[cycle_idx];
+    // 1. AUTO MODE OVERRIDE (only Heater 1)
+    if (auto_is_running) {
+      is_active = true;
+      is_auto_controlled = true;
+      int cycle_idx = current_auto_step - 1;
+      target_t = config.auto_target_temps[cycle_idx];
+      max_t = config.auto_max_temps[cycle_idx];
 #if AUTO_CONTROL_SENSOR == 1
-        current_t = ir1_temp;
+      current_t = ir1_temp;
 #endif
+    }
+    // 2. MANUAL PRESET MODE (only Heater 1)
+    else if (local_manual_preset_running && system_run) {
+      is_active = true;
+      is_auto_controlled = true;
+      target_t = config.manual_target_temps[local_preset_idx];
+      max_t = config.manual_max_temps[local_preset_idx];
+    }
+    // 3. STANDBY / BASIC MANUAL
+    else {
+      if (!local_manual_started) {
+        is_active = false;
       }
-      // 2. MANUAL PRESET MODE
-      else if (i == MAIN_HEATER_INDEX && local_manual_preset_running && system_run) {
-        is_active = true;
-        is_auto_controlled = true;
-        target_t = config.manual_target_temps[local_preset_idx];
-        max_t = config.manual_max_temps[local_preset_idx];
-#if AUTO_CONTROL_SENSOR == 1
-        current_t = ir1_temp;
-#endif
+    }
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        sysState.auto_step = 0;
+        xSemaphoreGive(dataMutex);
       }
-      // 3. STANDBY / BASIC MANUAL
-      else {
-        if (!local_manual_started) {
-          is_active = false;
-        }
-        if (i == MAIN_HEATER_INDEX && (auto_is_running || local_manual_preset_running)) {
-          // Blocked by Auto/Preset
-        }
-      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
+    // === PID & OUTPUT LOGIC ===
+    float output_percent = 0.0f;
+    bool cutoff_active = false;
+    bool is_ready_status = false;
 
-      // === PID & OUTPUT LOGIC ===
-      float output_percent = 0.0f;
-      bool cutoff_active = false;
-      bool is_ready_status = false;
-
-      if (has_go_to && is_active && !isnan(current_t)) {
-        if (current_t >= max_t) {
-          cutoff_active = true;
-          output_percent = 0.0f;
-          pid_integral[i] = 0;
-        } else {
-          float error = target_t - current_t;
-          uint32_t now = millis();
-          float dt = (pid_last_time[i] == 0) ? 0.05f : (now - pid_last_time[i]) / 1000.0f;
-          if (dt > 0.5f) dt = 0.05f;
-          pid_last_time[i] = now;
-
-          pid_integral[i] += error * dt;
-          pid_integral[i] = constrain(pid_integral[i], -100, 100);
-          float derivative = (dt > 0) ? ((error - pid_prev_error[i]) / dt) : 0;
-          pid_prev_error[i] = error;
-          float P = Kp[i] * error;
-          float I = Ki[i] * pid_integral[i];
-          float D = Kd[i] * derivative;
-          output_percent = P + I + D;
-          output_percent = constrain(output_percent, 0, 100);
-          if (fabs(error) <= READY_THRESHOLD) {
-            if (ready_stable_start[i] == 0) ready_stable_start[i] = millis();
-            if (millis() - ready_stable_start[i] >= READY_HOLD_MS) {
-              is_ready_status = true;
-            }
-          } else {
-            ready_stable_start[i] = 0;
-          }
-        }
-      } else {
+    if (has_go_to && is_active && !isnan(current_t)) {
+      if (current_t >= max_t) {
+        cutoff_active = true;
         output_percent = 0.0f;
-        pid_integral[i] = 0;
-        pid_prev_error[i] = 0;
-        pid_last_time[i] = 0;
-        ready_stable_start[i] = 0;
-      }
-
-      if (is_ready_status && !prev_ready_state[i]) {
-        beep_mode = BEEP_MODE_READY;
-        beep_queue = 6;
-      }
-      prev_ready_state[i] = is_ready_status;
-
-      tpo_set_percent(i, output_percent);
-      if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-        sysState.heater_cutoff[i] = cutoff_active;
-        xSemaphoreGive(dataMutex);
-      }
-
-      // === AUTO MODE CYCLE TRANSITION ===
-      if (i == MAIN_HEATER_INDEX && auto_is_running && has_go_to) {
-#if AUTO_CONTROL_SENSOR == 1
-        float control_temp = ir1_temp;
-#else
-        float control_temp = current_temps[i];
-#endif
-        if (!isnan(control_temp)) {
-          if (is_ready_status) {
-            has_reached_target[i] = true;
-            if (control_temp > peak_temp[i]) peak_temp[i] = control_temp;
-          }
-
-          if (has_reached_target[i] && (peak_temp[i] - control_temp) > 5.0f) {
-            if (millis() - cycle_change_debounce > 1000) {
-              if (current_auto_step < 3) {
-                current_auto_step++;
-              } else {
-                current_auto_step = 1;
-              }
-              if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-                sysState.auto_step = current_auto_step;
-                xSemaphoreGive(dataMutex);
-              }
-              peak_temp[i] = 0;
-              has_reached_target[i] = false;
-              cycle_change_debounce = millis();
-            }
-          }
-        }
-      }
-
-      if (!has_go_to) {
-        if (current_auto_step != 0) {
-          if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-            sysState.auto_step = 0;
-            xSemaphoreGive(dataMutex);
-          }
-          current_auto_step = 0;
-        }
-        peak_temp[i] = 0;
-        has_reached_target[i] = false;
-        cycle_change_debounce = 0;
-      }
-
-      // === Display Freeze Logic ===
-      float val_to_display = current_temps[i];
-      if (is_ready_status) {
-        if (millis() - snapshot_timer[i] > 10000) {
-          val_to_display = current_temps[i];
-          snapshot_timer[i] = millis();
-        } else {
-          val_to_display = last_displayed_val[i];
-        }
+        pid_integral[HEATER_IDX] = 0;
       } else {
-        val_to_display = current_temps[i];
-        snapshot_timer[i] = millis() - 10000;
+        float error = target_t - current_t;
+        uint32_t now = millis();
+        float dt = (pid_last_time[HEATER_IDX] == 0) ? 0.05f : (now - pid_last_time[HEATER_IDX]) / 1000.0f;
+        if (dt > 0.5f) dt = 0.05f;
+        pid_last_time[HEATER_IDX] = now;
+
+        pid_integral[HEATER_IDX] += error * dt;
+        pid_integral[HEATER_IDX] = constrain(pid_integral[HEATER_IDX], -100, 100);
+        float derivative = (dt > 0) ? ((error - pid_prev_error[HEATER_IDX]) / dt) : 0;
+        pid_prev_error[HEATER_IDX] = error;
+        float P = Kp[HEATER_IDX] * error;
+        float I = Ki[HEATER_IDX] * pid_integral[HEATER_IDX];
+        float D = Kd[HEATER_IDX] * derivative;
+        output_percent = P + I + D;
+        output_percent = constrain(output_percent, 0, 100);
+
+        if (fabs(error) <= READY_THRESHOLD) {
+          if (ready_stable_start == 0) ready_stable_start = millis();
+          if (millis() - ready_stable_start >= READY_HOLD_MS) {
+            is_ready_status = true;
+          }
+        } else {
+          ready_stable_start = 0;
+        }
       }
-      last_displayed_val[i] = val_to_display;
-      if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-        sysState.heater_ready[i] = is_ready_status;
-        sysState.displayed_temps[i] = val_to_display;
-        sysState.auto_step = current_auto_step;
-        xSemaphoreGive(dataMutex);
+    } else {
+      output_percent = 0.0f;
+      pid_integral[HEATER_IDX] = 0;
+      pid_prev_error[HEATER_IDX] = 0;
+      pid_last_time[HEATER_IDX] = 0;
+      ready_stable_start = 0;
+    }
+
+    // Ready beep
+    if (is_ready_status && !prev_ready_state) {
+      beep_mode = BEEP_MODE_READY;
+      beep_queue = 6;
+    }
+    prev_ready_state = is_ready_status;
+
+    tpo_set_percent(HEATER_IDX, output_percent);
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_cutoff[HEATER_IDX] = cutoff_active;
+      xSemaphoreGive(dataMutex);
+    }
+
+    // === AUTO MODE CYCLE TRANSITION (only Heater 1) ===
+    if (auto_is_running && has_go_to) {
+#if AUTO_CONTROL_SENSOR == 1
+      float control_temp = ir1_temp;
+#else
+      float control_temp = sysState.tc_temps[HEATER_IDX];
+#endif
+      if (!isnan(control_temp)) {
+        if (is_ready_status) {
+          has_reached_target = true;
+          if (control_temp > peak_temp) peak_temp = control_temp;
+        }
+
+        if (has_reached_target && (control_temp < 40.0f)) {
+          if (millis() - cycle_change_debounce > 1000) {
+            if (current_auto_step < 3) {
+              current_auto_step++;
+            } else {
+              current_auto_step = 1;
+            }
+            if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+              sysState.auto_step = current_auto_step;
+              xSemaphoreGive(dataMutex);
+            }
+            peak_temp = 0;
+            has_reached_target = false;
+            cycle_change_debounce = millis();
+          }
+        }
       }
     }
 
+    if (!has_go_to) {
+      if (current_auto_step != 0) {
+        if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+          sysState.auto_step = 0;
+          xSemaphoreGive(dataMutex);
+        }
+      }
+      peak_temp = 0;
+      has_reached_target = false;
+      cycle_change_debounce = 0;
+      auto_low_temp_timer = 0;
+    }
+
+    if (auto_is_running && has_go_to) {
+      if (!isnan(ir1_temp) && ir1_temp < 40.0f) {
+        
+        if (auto_low_temp_timer == 0) {
+          auto_low_temp_timer = millis(); 
+        } 
+        else if (millis() - auto_low_temp_timer > 30000) {
+          
+          // สั่ง Stop การทำงาน
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            has_go_to = false;               
+            sysState.auto_was_started = false; 
+            sysState.auto_step = 0;        
+            
+            sysState.manual_was_started = false;
+            sysState.manual_preset_running = false;
+            
+            xSemaphoreGive(dataMutex);
+          }
+          
+          beep_mode = 3; 
+          beep_queue = 4; 
+
+          auto_low_temp_timer = 0; 
+        }
+      } else {
+        // ถ้าอุณหภูมิเกิน 40 หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
+        auto_low_temp_timer = 0; 
+      }
+    } else {
+      // ถ้าไม่ได้รัน Auto ก็รีเซ็ตเวลาทิ้ง
+      auto_low_temp_timer = 0;
+    }
+
+    // === Display Freeze Logic ===
+    float tc_temp = NAN;
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      tc_temp = sysState.tc_temps[HEATER_IDX];
+      xSemaphoreGive(dataMutex);
+    }
+    float val_to_display = tc_temp;
+    if (is_ready_status) {
+      if (millis() - snapshot_timer > 10000) {
+        val_to_display = tc_temp;
+        snapshot_timer = millis();
+      } else {
+        val_to_display = last_displayed_val;
+      }
+    } else {
+      snapshot_timer = millis() - 10000;
+    }
+    last_displayed_val = val_to_display;
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_ready[HEATER_IDX] = is_ready_status;
+      sysState.displayed_temps[HEATER_IDX] = val_to_display;
+      sysState.auto_step = current_auto_step;
+      xSemaphoreGive(dataMutex);
+    }
+
     freq_ctl_cnt++;
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+// 3b. HEATER 2 CONTROL TASK (Secondary Heater)
+void TaskHeater2Control(void* pvParameters) {
+  const int HEATER_IDX = 1;
+  const TickType_t xFrequency = pdMS_TO_TICKS(50);
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
+  // Local state for this heater
+  float ready_stable_start = 0;
+  uint32_t snapshot_timer = 0;
+  float last_displayed_val = 0;
+  bool prev_ready_state = false;
+
+  for (;;) {
+    float current_t = NAN;
+    bool local_manual_started = false;
+    bool local_auto_running = false;
+    bool local_preset_running = false;
+
+    // Read shared data
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      current_t = sysState.tc_temps[HEATER_IDX];
+      local_manual_started = sysState.manual_was_started;
+      local_auto_running = sysState.auto_was_started;
+      local_preset_running = sysState.manual_preset_running;
+      xSemaphoreGive(dataMutex);
+    }
+
+    bool is_active = config.heater_active[HEATER_IDX];
+    float target_t = config.target_temps[HEATER_IDX];
+    float max_t = config.max_temps[HEATER_IDX];
+
+    if (local_auto_running || local_preset_running) {
+      is_active = false;
+    } else if (!local_manual_started) {
+      is_active = false;
+    }
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        xSemaphoreGive(dataMutex);
+      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
+    // === PID & OUTPUT LOGIC ===
+    float output_percent = 0.0f;
+    bool cutoff_active = false;
+    bool is_ready_status = false;
+
+    if (has_go_to && is_active && !isnan(current_t)) {
+      if (current_t >= max_t) {
+        cutoff_active = true;
+        output_percent = 0.0f;
+        pid_integral[HEATER_IDX] = 0;
+      } else {
+        float error = target_t - current_t;
+        uint32_t now = millis();
+        float dt = (pid_last_time[HEATER_IDX] == 0) ? 0.05f : (now - pid_last_time[HEATER_IDX]) / 1000.0f;
+        if (dt > 0.5f) dt = 0.05f;
+        pid_last_time[HEATER_IDX] = now;
+
+        pid_integral[HEATER_IDX] += error * dt;
+        pid_integral[HEATER_IDX] = constrain(pid_integral[HEATER_IDX], -100, 100);
+        float derivative = (dt > 0) ? ((error - pid_prev_error[HEATER_IDX]) / dt) : 0;
+        pid_prev_error[HEATER_IDX] = error;
+        float P = Kp[HEATER_IDX] * error;
+        float I = Ki[HEATER_IDX] * pid_integral[HEATER_IDX];
+        float D = Kd[HEATER_IDX] * derivative;
+        output_percent = P + I + D;
+        output_percent = constrain(output_percent, 0, 100);
+
+        if (fabs(error) <= READY_THRESHOLD) {
+          if (ready_stable_start == 0) ready_stable_start = millis();
+          if (millis() - ready_stable_start >= READY_HOLD_MS) {
+            is_ready_status = true;
+          }
+        } else {
+          ready_stable_start = 0;
+        }
+      }
+    } else {
+      output_percent = 0.0f;
+      pid_integral[HEATER_IDX] = 0;
+      pid_prev_error[HEATER_IDX] = 0;
+      pid_last_time[HEATER_IDX] = 0;
+      ready_stable_start = 0;
+    }
+
+    // Ready beep
+    if (is_ready_status && !prev_ready_state) {
+      beep_mode = BEEP_MODE_READY;
+      beep_queue = 6;
+    }
+    prev_ready_state = is_ready_status;
+
+    tpo_set_percent(HEATER_IDX, output_percent);
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_cutoff[HEATER_IDX] = cutoff_active;
+      xSemaphoreGive(dataMutex);
+    }
+
+    // === Display Freeze Logic ===
+    float tc_temp = NAN;
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      tc_temp = sysState.tc_temps[HEATER_IDX];
+      xSemaphoreGive(dataMutex);
+    }
+    float val_to_display = tc_temp;
+    if (is_ready_status) {
+      if (millis() - snapshot_timer > 10000) {
+        val_to_display = tc_temp;
+        snapshot_timer = millis();
+      } else {
+        val_to_display = last_displayed_val;
+      }
+    } else {
+      snapshot_timer = millis() - 10000;
+    }
+    last_displayed_val = val_to_display;
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_ready[HEATER_IDX] = is_ready_status;
+      sysState.displayed_temps[HEATER_IDX] = val_to_display;
+      xSemaphoreGive(dataMutex);
+    }
+
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+// 3c. HEATER 3 CONTROL TASK (Tertiary Heater)
+void TaskHeater3Control(void* pvParameters) {
+  const int HEATER_IDX = 2;
+  const TickType_t xFrequency = pdMS_TO_TICKS(50);
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  bool local_auto_running = false;
+  bool local_preset_running = false;
+
+  // Local state for this heater
+  float ready_stable_start = 0;
+  uint32_t snapshot_timer = 0;
+  float last_displayed_val = 0;
+  bool prev_ready_state = false;
+
+  for (;;) {
+    float current_t = NAN;
+    bool local_manual_started = false;
+
+    // Read shared data
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      current_t = sysState.tc_temps[HEATER_IDX];
+      local_manual_started = sysState.manual_was_started;
+      local_auto_running = sysState.auto_was_started;
+      local_preset_running = sysState.manual_preset_running;
+      xSemaphoreGive(dataMutex);
+    }
+
+    bool is_active = config.heater_active[HEATER_IDX];
+    float target_t = config.target_temps[HEATER_IDX];
+    float max_t = config.max_temps[HEATER_IDX];
+
+    if (local_auto_running || local_preset_running) {
+      is_active = false;
+    } else if (!local_manual_started) {
+      is_active = false;
+    }
+    if (has_go_to && is_active && isnan(current_t)) {
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        xSemaphoreGive(dataMutex);
+      }
+      beep_mode = 3;
+      beep_queue = 10;
+    }
+    // === PID & OUTPUT LOGIC ===
+    float output_percent = 0.0f;
+    bool cutoff_active = false;
+    bool is_ready_status = false;
+
+    if (has_go_to && is_active && !isnan(current_t)) {
+      if (current_t >= max_t) {
+        cutoff_active = true;
+        output_percent = 0.0f;
+        pid_integral[HEATER_IDX] = 0;
+      } else {
+        float error = target_t - current_t;
+        uint32_t now = millis();
+        float dt = (pid_last_time[HEATER_IDX] == 0) ? 0.05f : (now - pid_last_time[HEATER_IDX]) / 1000.0f;
+        if (dt > 0.5f) dt = 0.05f;
+        pid_last_time[HEATER_IDX] = now;
+
+        pid_integral[HEATER_IDX] += error * dt;
+        pid_integral[HEATER_IDX] = constrain(pid_integral[HEATER_IDX], -100, 100);
+        float derivative = (dt > 0) ? ((error - pid_prev_error[HEATER_IDX]) / dt) : 0;
+        pid_prev_error[HEATER_IDX] = error;
+        float P = Kp[HEATER_IDX] * error;
+        float I = Ki[HEATER_IDX] * pid_integral[HEATER_IDX];
+        float D = Kd[HEATER_IDX] * derivative;
+        output_percent = P + I + D;
+        output_percent = constrain(output_percent, 0, 100);
+
+        if (fabs(error) <= READY_THRESHOLD) {
+          if (ready_stable_start == 0) ready_stable_start = millis();
+          if (millis() - ready_stable_start >= READY_HOLD_MS) {
+            is_ready_status = true;
+          }
+        } else {
+          ready_stable_start = 0;
+        }
+      }
+    } else {
+      output_percent = 0.0f;
+      pid_integral[HEATER_IDX] = 0;
+      pid_prev_error[HEATER_IDX] = 0;
+      pid_last_time[HEATER_IDX] = 0;
+      ready_stable_start = 0;
+    }
+
+    // Ready beep
+    if (is_ready_status && !prev_ready_state) {
+      beep_mode = BEEP_MODE_READY;
+      beep_queue = 6;
+    }
+    prev_ready_state = is_ready_status;
+
+    tpo_set_percent(HEATER_IDX, output_percent);
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_cutoff[HEATER_IDX] = cutoff_active;
+      xSemaphoreGive(dataMutex);
+    }
+
+    // === Display Freeze Logic ===
+    float tc_temp = NAN;
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      tc_temp = sysState.tc_temps[HEATER_IDX];
+      xSemaphoreGive(dataMutex);
+    }
+    float val_to_display = tc_temp;
+    if (is_ready_status) {
+      if (millis() - snapshot_timer > 10000) {
+        val_to_display = tc_temp;
+        snapshot_timer = millis();
+      } else {
+        val_to_display = last_displayed_val;
+      }
+    } else {
+      snapshot_timer = millis() - 10000;
+    }
+    last_displayed_val = val_to_display;
+
+    if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+      sysState.heater_ready[HEATER_IDX] = is_ready_status;
+      sysState.displayed_temps[HEATER_IDX] = val_to_display;
+      xSemaphoreGive(dataMutex);
+    }
+
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
 }
@@ -677,8 +1023,15 @@ void TaskInput(void* pvParameters) {
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
           UIScreen scr = ui.getScreen();
           ui.handleButtonSingleClick(config, go_to, has_go_to);
-          if (scr == SCREEN_MANUAL_MODE && sysState.manual_preset_running && has_go_to) {
+          if (scr == SCREEN_MANUAL_MODE) {
             sysState.manual_preset_index = ui.getManualConfirmedPreset();
+            if (has_go_to) {
+               sysState.manual_preset_running = true;
+               sysState.manual_was_started = true;
+               
+               sysState.auto_was_started = false;
+               sysState.auto_step = 0;
+            }
           }
           xSemaphoreGive(dataMutex);
         }
@@ -696,6 +1049,13 @@ void TaskInput(void* pvParameters) {
           beep_queue += 2;
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
             // Button 0: Settings
+            if (ui.getScreen() == SCREEN_SLEEP) {
+              ui.switchToStandby();
+              ui.resetInactivityTimer();
+              xSemaphoreGive(dataMutex);
+              pcf_state.btn_pressed[i] = btn[i];
+              continue;
+            }
             if (i == 0) {
               UIScreen scr = ui.getScreen();
               if (scr == SCREEN_STANDBY || scr == SCREEN_AUTO_MODE || scr == SCREEN_MANUAL_MODE) {
@@ -707,26 +1067,43 @@ void TaskInput(void* pvParameters) {
             // Button 1: Start/Stop
             else if (i == 1) {
               UIScreen current = ui.getScreen();
-              if (current == SCREEN_STANDBY) {
-                sysState.manual_was_started = !sysState.manual_was_started;
-                has_go_to = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
-              } else if (current == SCREEN_AUTO_MODE) {
-                if (sysState.auto_was_started) {
-                  sysState.auto_was_started = false;
-                  sysState.auto_step = 0;
-                } else {
-                  sysState.auto_was_started = true;
-                  sysState.auto_step = 1;
+
+              bool isAnyRunning = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
+
+              if (isAnyRunning) {
+                // --- CASE: STOP ---
+                sysState.manual_was_started = false;
+                sysState.auto_was_started = false;
+                sysState.auto_step = 0;
+                sysState.manual_preset_running = false;
+                has_go_to = false;
+
+              } else {
+                bool h1_fault = false;
+                if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+                    h1_fault = (sysState.tc_faults[0] != 0);
+                    xSemaphoreGive(dataMutex);
                 }
-                has_go_to = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
-              } else if (current == SCREEN_MANUAL_MODE) {
-                if (sysState.manual_preset_running) {
-                  sysState.manual_preset_running = false;
+                if (h1_fault) {
+                  beep_mode = 3;  // เสียง Alarm สั้นๆ หรือแบบเตือน
+                  beep_queue = 2;
                 } else {
-                  sysState.manual_preset_running = true;
-                  sysState.manual_preset_index = ui.getManualConfirmedPreset();
+                  // --- CASE: START ---
+                  if (current == SCREEN_STANDBY) {
+                    sysState.manual_was_started = true;
+                    has_go_to = true;
+
+                  } else if (current == SCREEN_AUTO_MODE) {
+                    sysState.auto_was_started = true;
+                    sysState.auto_step = 1;
+                    has_go_to = true;
+
+                  } else if (current == SCREEN_MANUAL_MODE) {
+                    sysState.manual_preset_running = true;
+                    sysState.manual_preset_index = ui.getManualConfirmedPreset();
+                    has_go_to = true;
+                  }
                 }
-                has_go_to = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
               }
             }
             // Button 3: Mode Toggle
@@ -781,7 +1158,20 @@ void TaskDisplay(void* pvParameters) {
     AppState st;
     bool alarm_active = false;
     bool lock_active = false;
+    bool all_sensors_ok = true;
 
+    uint32_t on_ticks[3];
+    uint32_t window;
+
+    portENTER_CRITICAL(&tpoMux);
+    for(int i=0; i<3; i++) on_ticks[i] = tpo_on_ticks[i];
+    window = tpo_window_period_ticks;
+    portEXIT_CRITICAL(&tpoMux);
+
+    for(int i=0; i<3; i++) {
+       st.heater_power[i] = (window > 0) ? (on_ticks[i] * 100.0f / window) : 0.0f;
+    }
+    
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       if (ui.checkInactivity(config, has_go_to, go_to)) {
         beep_mode = 1;
@@ -790,6 +1180,7 @@ void TaskDisplay(void* pvParameters) {
 
       for (int i = 0; i < 3; i++) {
         st.tc_temps[i] = sysState.displayed_temps[i];
+        if (isnan(st.tc_temps[i])) all_sensors_ok = false;
         st.tc_faults[i] = sysState.tc_faults[i];
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
         if (st.heater_cutoff_state[i]) {
@@ -819,13 +1210,14 @@ void TaskDisplay(void* pvParameters) {
     }
 
     if (getWiFiStatus() == WIFI_STATUS_CONNECTED) {
-       String ip = WiFi.localIP().toString();
-       strncpy(st.ip_address, ip.c_str(), 19);
-       st.ip_address[19] = '\0';
+      String ip = WiFi.localIP().toString();
+      strncpy(st.ip_address, ip.c_str(), 19);
+      st.ip_address[19] = '\0';
     } else {
-       strcpy(st.ip_address, "---");
+      strcpy(st.ip_address, "---");
     }
-
+    
+    st.is_warning = alarm_active || (beep_mode == 3);
     st.is_heating_active = has_go_to;
     st.target_temp = go_to;
     st.temp_unit = config.temp_unit;
@@ -839,8 +1231,10 @@ void TaskDisplay(void* pvParameters) {
       if (beep_queue == 0) beep_queue = 2;
     } else if (alarm_active) {
       if (beep_queue == 0) beep_queue = 2;
+    } else if (beep_mode == 3 && all_sensors_ok) {
+      beep_queue = 0;
+      beep_mode = 0;
     }
-
     freq_disp_cnt++;
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -861,8 +1255,11 @@ void TaskDebug(void* pvParameters) {
       Serial.printf("  Input   : %d Hz (Target: 50)\n", freq_input_cnt);
       Serial.printf("  Display : %d Hz (Target: 10)\n", freq_disp_cnt);
 
-      freq_max_cnt = 0; freq_mlx_cnt = 0; freq_ctl_cnt = 0;
-      freq_input_cnt = 0; freq_disp_cnt = 0;
+      freq_max_cnt = 0;
+      freq_mlx_cnt = 0;
+      freq_ctl_cnt = 0;
+      freq_input_cnt = 0;
+      freq_disp_cnt = 0;
 
       Serial.println("--- [Module Data Log] ---");
       if (xSemaphoreTake(dataMutex, 100) == pdTRUE) {
@@ -883,25 +1280,34 @@ void TaskDebug(void* pvParameters) {
 
 // 7. SOUND TASK
 void TaskSound(void* pvParameters) {
-  pinMode(BUZZER, OUTPUT);
-  digitalWrite(BUZZER, LOW);
+  ledcAttach(BUZZER, BUZZER_FREQ, BUZZER_RES);
 
   for (;;) {
     if (beep_queue > 0) {
       int on_time = 60;
       int off_time = 100;
+
       if (beep_mode == 1) {
-        on_time = 250; off_time = 250;
+        on_time = 250;
+        off_time = 250;
       } else if (beep_mode == 3) {
-        on_time = 3000; off_time = 100;
+        on_time = 3000;
+        off_time = 100;
       }
 
-      if (config.sound_on) {
-        digitalWrite(BUZZER, HIGH);
+      // --- ขับเสียงด้วย PWM (API v3.0+) ---
+      if (config.sound_volume > 0) {
+        int duty = map(config.sound_volume, 0, 100, 0, 128);
+
+        // แก้ไข: ส่งค่าไปที่ขา BUZZER โดยตรง (ไม่ต้องใส่ Channel แล้ว)
+        ledcWrite(BUZZER, duty);
+      } else {
+        ledcWrite(BUZZER, 0);
       }
 
       vTaskDelay(pdMS_TO_TICKS(on_time));
-      digitalWrite(BUZZER, LOW);
+
+      ledcWrite(BUZZER, 0);  // ปิดเสียง
       vTaskDelay(pdMS_TO_TICKS(off_time));
 
       if (beep_queue >= 2) beep_queue -= 2;
@@ -909,6 +1315,7 @@ void TaskSound(void* pvParameters) {
 
       if (beep_queue == 0) beep_mode = 0;
     } else {
+      ledcWrite(BUZZER, 0);  // เงียบเมื่อไม่มีคิว
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
@@ -971,7 +1378,7 @@ void setup() {
     config.temp_unit = 'C';
     config.idle_off_mode = IDLE_OFF_30_MIN;
     config.startup_mode = STARTUP_OFF;
-    config.sound_on = true;
+    config.sound_volume = 100;
     config.ir_emissivity[0] = 1.0f;
     config.ir_emissivity[1] = 1.0f;
     config.tc_probe_offset = 0.0f;
@@ -1001,12 +1408,17 @@ void setup() {
     has_go_to = false;
   }
 
-  pinMode(SSR_PIN1, OUTPUT); digitalWrite(SSR_PIN1, LOW);
-  pinMode(SSR_PIN2, OUTPUT); digitalWrite(SSR_PIN2, LOW);
-  pinMode(SSR_PIN3, OUTPUT); digitalWrite(SSR_PIN3, LOW);
-  pinMode(BUZZER, OUTPUT);   digitalWrite(BUZZER, LOW);
-  pinMode(TFT_CS, OUTPUT);   digitalWrite(TFT_CS, HIGH);
+  pinMode(SSR_PIN1, OUTPUT);
+  digitalWrite(SSR_PIN1, LOW);
+  pinMode(SSR_PIN2, OUTPUT);
+  digitalWrite(SSR_PIN2, LOW);
+  pinMode(SSR_PIN3, OUTPUT);
+  digitalWrite(SSR_PIN3, LOW);
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
   pinMode(ENCODER_SW, INPUT_PULLUP);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH);
 
   max31855_init_pins();
   setup_encoder_fixed();
@@ -1017,6 +1429,8 @@ void setup() {
   mlx1.begin(IR1_ADDR, &Wire);
   mlx2.begin(IR2_ADDR, &Wire);
 
+  setBrightness(config.brightness);
+
   tft.init();
   tft.setRotation(3);
   tft.fillScreen(TFT_BLACK);
@@ -1026,9 +1440,11 @@ void setup() {
 
   // Core 0: WiFi
   xTaskCreatePinnedToCore(TaskWiFiManager, "WiFiMgr", 4096, NULL, 1, NULL, 0);
-  
+
   // Core 1: Application
-  xTaskCreatePinnedToCore(TaskControl, "Control", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskHeater1Control, "Heater1", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskHeater2Control, "Heater2", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskHeater3Control, "Heater3", 4096, NULL, 3, NULL, 1);
   xTaskCreatePinnedToCore(TaskMAX, "MAX31855", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskMLX, "MLX90614", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskInput, "Input", 4096, NULL, 2, NULL, 1);
@@ -1047,67 +1463,600 @@ void loop() {
 
 // ========== [WiFi & Web Server Functions] ==========
 void setupWebServer() {
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    String html = "<!DOCTYPE html><html><head>";
-    html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-    html += "<title>Smart Heater</title>";
-    html += "<style>";
-    html += "body{font-family:Arial;margin:20px;background:#1a1a2e;color:#eee}";
-    html += "h2{color:#0ff}";
-    html += ".val{color:#0f0;font-weight:bold}";
-    html += ".warn{color:#f80}";
-    html += ".err{color:#f00}";
-    html += "table{width:100%;border-collapse:collapse}";
-    html += "th,td{padding:8px;text-align:left;border:1px solid #444}";
-    html += "th{background:#333}";
-    html += "button{padding:10px 20px;margin:5px;cursor:pointer}";
-    html += "</style></head><body>";
-    html += "<h2>Smart Heater Status</h2>";
+  
+  // ========== [1. JSON API ENDPOINT - For 1-second updates] ==========
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String json = "{";
     
-    html += "<h3>WiFi Status</h3>";
-    html += "<p>Signal Strength: <span class='val'>" + String(wifiSignalStrength) + " dBm</span></p>";
-    html += "<p>IP: <span class='val'>" + WiFi.localIP().toString() + "</span></p>";
-    
-    float tcs[3] = {0}, irs[2] = {0};
-    bool manual_started = false, auto_started = false;
-    uint8_t a_step = 0;
+    float tcs[3] = {0}, irs[2] = {0}, ir_amb[2] = {0};
+    float displayed[3] = {0};
+    float probe_temp = 0, probe_peak = 0;
+    uint8_t faults[3] = {0};
+    bool cutoff[3] = {false}, ready[3] = {false};
+    bool manual_started = false, auto_started = false, preset_running = false;
+    uint8_t a_step = 0, preset_idx = 0;
+    uint32_t on_ticks[3] = {0};
     
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      for (int i = 0; i < 3; i++) tcs[i] = sysState.tc_temps[i];
-      for (int i = 0; i < 2; i++) irs[i] = sysState.ir_temps[i];
+      for (int i = 0; i < 3; i++) {
+        tcs[i] = sysState.tc_temps[i];
+        displayed[i] = sysState.displayed_temps[i];
+        faults[i] = sysState.tc_faults[i];
+        cutoff[i] = sysState.heater_cutoff[i];
+        ready[i] = sysState.heater_ready[i];
+      }
+      for (int i = 0; i < 2; i++) {
+        irs[i] = sysState.ir_temps[i];
+        ir_amb[i] = sysState.ir_ambient[i];
+      }
+      probe_temp = sysState.tc_probe_temp;
+      probe_peak = sysState.tc_probe_peak;
       manual_started = sysState.manual_was_started;
       auto_started = sysState.auto_was_started;
+      preset_running = sysState.manual_preset_running;
+      preset_idx = sysState.manual_preset_index;
       a_step = sysState.auto_step;
       xSemaphoreGive(dataMutex);
     }
     
-    html += "<hr><h3>Temperature Readings</h3>";
-    html += "<table>";
-    html += "<tr><th>Sensor</th><th>Value</th></tr>";
+    // Get TPO on_ticks for heater power %
+    portENTER_CRITICAL(&tpoMux);
+    for (int i = 0; i < 3; i++) on_ticks[i] = tpo_on_ticks[i];
+    uint32_t window = tpo_window_period_ticks;
+    portEXIT_CRITICAL(&tpoMux);
+    
+    // Calculate power percentages
+    float power[3];
     for (int i = 0; i < 3; i++) {
-      html += "<tr><td>TC" + String(i+1) + "</td>";
-      html += "<td class='val'>" + String(tcs[i], 1) + " &deg;C</td></tr>";
+      power[i] = (window > 0) ? (on_ticks[i] * 100.0f / window) : 0;
     }
+    
+    // Determine current mode
+    String mode = "STANDBY";
+    if (has_go_to) {
+      if (auto_started && a_step > 0) {
+        mode = "AUTO_CYCLE_" + String(a_step);
+      } else if (preset_running) {
+        mode = "PRESET_" + String(preset_idx + 1);
+      } else if (manual_started) {
+        mode = "MANUAL";
+      }
+    }
+    
+    // Build JSON
+    json += "\"mode\":\"" + mode + "\",";
+    json += "\"timestamp\":" + String(millis()) + ",";
+    
+    // Temperatures
+    json += "\"temperatures\":{";
+    json += "\"tc\":[";
+    for (int i = 0; i < 3; i++) {
+      json += isnan(tcs[i]) ? "null" : String(tcs[i], 1);
+      if (i < 2) json += ",";
+    }
+    json += "],\"displayed\":[";
+    for (int i = 0; i < 3; i++) {
+      json += isnan(displayed[i]) ? "null" : String(displayed[i], 1);
+      if (i < 2) json += ",";
+    }
+    json += "],\"ir\":[";
     for (int i = 0; i < 2; i++) {
-      html += "<tr><td>IR" + String(i+1) + "</td>";
-      html += "<td class='val'>" + String(irs[i], 1) + " &deg;C</td></tr>";
+      json += isnan(irs[i]) ? "null" : String(irs[i], 1);
+      if (i < 1) json += ",";
     }
-    html += "</table>";
-    html += "<hr><h3>System Status</h3>";
-    html += "<p>Manual Started: <span class='" + String(manual_started ? "val" : "warn") + "'>";
-    html += String(manual_started ? "YES" : "NO") + "</span></p>";
-    html += "<p>Auto Started: <span class='" + String(auto_started ? "val" : "warn") + "'>";
-    html += String(auto_started ? "YES" : "NO") + "</span></p>";
-    html += "<p>Auto Step: " + String(a_step) + "</p>";
-    html += "<br><a href='/update'><button>OTA Update</button></a>";
-    html += "</body></html>";
+    json += "],\"ir_ambient\":[";
+    for (int i = 0; i < 2; i++) {
+      json += isnan(ir_amb[i]) ? "null" : String(ir_amb[i], 1);
+      if (i < 1) json += ",";
+    }
+    json += "],\"probe\":" + (isnan(probe_temp) ? String("null") : String(probe_temp, 1));
+    json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
+    json += "},";
+    
+    // Heaters status
+    json += "\"heaters\":[";
+    for (int i = 0; i < 3; i++) {
+      json += "{";
+      json += "\"active\":" + String(config.heater_active[i] ? "true" : "false") + ",";
+      json += "\"target\":" + String(config.target_temps[i], 1) + ",";
+      json += "\"max\":" + String(config.max_temps[i], 1) + ",";
+      json += "\"power\":" + String(power[i], 1) + ",";
+      json += "\"cutoff\":" + String(cutoff[i] ? "true" : "false") + ",";
+      json += "\"ready\":" + String(ready[i] ? "true" : "false") + ",";
+      json += "\"fault\":" + String(faults[i]);
+      json += "}";
+      if (i < 2) json += ",";
+    }
+    json += "],";
+    
+    // Warnings
+    json += "\"warnings\":[";
+    bool first_warn = true;
+    for (int i = 0; i < 3; i++) {
+      if (faults[i]) {
+        if (!first_warn) json += ",";
+        json += "\"TC" + String(i+1) + " FAULT\"";
+        first_warn = false;
+      }
+      if (cutoff[i]) {
+        if (!first_warn) json += ",";
+        json += "\"Heater " + String(i+1) + " CUTOFF\"";
+        first_warn = false;
+      }
+    }
+    json += "],";
+    
+    // WiFi
+    json += "\"wifi\":{";
+    json += "\"rssi\":" + String(wifiSignalStrength) + ",";
+    json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += "}";
+    
+    json += "}";
+    
+    request->send(200, "application/json", json);
+  });
+
+  // ========== [2. MAIN DASHBOARD PAGE] ==========
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Smart Heater Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      font-family: 'Segoe UI', Arial, sans-serif; 
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #eee; 
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    h1 { 
+      text-align: center; 
+      color: #0ff; 
+      margin-bottom: 20px;
+      text-shadow: 0 0 10px rgba(0,255,255,0.5);
+    }
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0,0,0,0.3);
+      padding: 10px 20px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .mode-badge {
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-weight: bold;
+      font-size: 1.1em;
+    }
+    .mode-STANDBY { background: #666; }
+    .mode-MANUAL { background: #2ecc71; }
+    .mode-AUTO { background: #e74c3c; }
+    .mode-PRESET { background: #f39c12; }
+    
+    .grid { 
+      display: grid; 
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+      gap: 20px; 
+      margin-bottom: 20px;
+    }
+    .card {
+      background: rgba(255,255,255,0.05);
+      border-radius: 15px;
+      padding: 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .card h3 { 
+      color: #0ff; 
+      margin-bottom: 15px;
+      border-bottom: 1px solid rgba(0,255,255,0.3);
+      padding-bottom: 10px;
+    }
+    
+    .heater-card {
+      position: relative;
+      overflow: hidden;
+    }
+    .heater-card.active { border-color: #2ecc71; }
+    .heater-card.fault { border-color: #e74c3c; animation: pulse-red 1s infinite; }
+    .heater-card.cutoff { border-color: #f39c12; }
+    .heater-card.ready { border-color: #2ecc71; box-shadow: 0 0 20px rgba(46,204,113,0.3); }
+    
+    @keyframes pulse-red {
+      0%, 100% { box-shadow: 0 0 5px rgba(231,76,60,0.5); }
+      50% { box-shadow: 0 0 20px rgba(231,76,60,0.8); }
+    }
+    
+    .temp-display {
+      font-size: 2.5em;
+      font-weight: bold;
+      text-align: center;
+      padding: 15px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      margin: 10px 0;
+    }
+    .temp-display.fault { color: #e74c3c; }
+    .temp-display.normal { color: #2ecc71; }
+    .temp-display.hot { color: #f39c12; }
+    
+    .power-bar {
+      height: 20px;
+      background: #333;
+      border-radius: 10px;
+      overflow: hidden;
+      margin: 10px 0;
+    }
+    .power-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #2ecc71, #f39c12, #e74c3c);
+      transition: width 0.3s ease;
+    }
+    
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .info-label { color: #888; }
+    .info-value { font-weight: bold; }
+    .info-value.ok { color: #2ecc71; }
+    .info-value.warn { color: #f39c12; }
+    .info-value.err { color: #e74c3c; }
+    
+    .warnings-panel {
+      background: rgba(231,76,60,0.2);
+      border: 1px solid #e74c3c;
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 20px;
+      display: none;
+    }
+    .warnings-panel.visible { display: block; }
+    .warnings-panel h3 { color: #e74c3c; }
+    .warning-item {
+      padding: 8px;
+      margin: 5px 0;
+      background: rgba(231,76,60,0.3);
+      border-radius: 5px;
+    }
+    
+    #chart-container {
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 15px;
+      height: 300px;
+    }
+    
+    .footer {
+      text-align: center;
+      margin-top: 20px;
+      color: #666;
+    }
+    .footer a {
+      color: #0ff;
+      text-decoration: none;
+      margin: 0 10px;
+    }
+    
+    .update-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #2ecc71;
+      display: inline-block;
+      margin-right: 5px;
+    }
+    .update-indicator.updating { animation: blink 0.5s infinite; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Heater Dashboard</h1>
+    
+    <div class="status-bar">
+      <div>
+        <span class="update-indicator" id="updateIndicator"></span>
+        <span id="lastUpdate">Connecting...</span>
+      </div>
+      <div id="modeDisplay" class="mode-badge mode-STANDBY">STANDBY</div>
+      <div>WiFi: <span id="wifiRssi">--</span> dBm</div>
+    </div>
+    
+    <div class="warnings-panel" id="warningsPanel">
+      <h3>⚠️ Warnings</h3>
+      <div id="warningsList"></div>
+    </div>
+    
+    <div class="grid">
+      <!-- Heater 1 -->
+      <div class="card heater-card" id="heater1">
+        <h3>Heater 1 (Main)</h3>
+        <div class="temp-display" id="temp1">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target1">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max1">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power1">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar1" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status1">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- Heater 2 -->
+      <div class="card heater-card" id="heater2">
+        <h3>Heater 2</h3>
+        <div class="temp-display" id="temp2">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target2">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max2">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power2">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar2" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status2">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- Heater 3 -->
+      <div class="card heater-card" id="heater3">
+        <h3>Heater 3</h3>
+        <div class="temp-display" id="temp3">-- °C</div>
+        <div class="info-row">
+          <span class="info-label">Target</span>
+          <span class="info-value" id="target3">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Max</span>
+          <span class="info-value" id="max3">--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Power</span>
+          <span class="info-value" id="power3">0%</span>
+        </div>
+        <div class="power-bar"><div class="power-fill" id="powerBar3" style="width:0%"></div></div>
+        <div class="info-row">
+          <span class="info-label">Status</span>
+          <span class="info-value" id="status3">Inactive</span>
+        </div>
+      </div>
+      
+      <!-- IR Sensors -->
+      <div class="card">
+        <h3>IR Sensors</h3>
+        <div class="info-row">
+          <span class="info-label">IR1 Object</span>
+          <span class="info-value" id="ir1">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR1 Ambient</span>
+          <span class="info-value" id="ir1amb">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR2 Object</span>
+          <span class="info-value" id="ir2">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IR2 Ambient</span>
+          <span class="info-value" id="ir2amb">-- °C</span>
+        </div>
+        <div class="info-row" style="margin-top:15px; border-top: 2px solid #0ff; padding-top:10px;">
+          <span class="info-label">Wire Probe</span>
+          <span class="info-value" id="probe">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Probe Peak</span>
+          <span class="info-value" id="probePeak">-- °C</span>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Temperature Chart -->
+    <div class="card">
+      <h3>📈 Temperature History (Last 60 seconds)</h3>
+      <div id="chart-container">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <a href="/update">🔄 OTA Update</a>
+      <span>|</span>
+      <span>IP: <span id="ipAddr">--</span></span>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    // Chart setup
+    const ctx = document.getElementById('tempChart').getContext('2d');
+    const maxDataPoints = 60;
+    const chartData = {
+      labels: [],
+      datasets: [
+        { label: 'TC1', data: [], borderColor: '#e74c3c', fill: false, tension: 0.3 },
+        { label: 'TC2', data: [], borderColor: '#2ecc71', fill: false, tension: 0.3 },
+        { label: 'TC3', data: [], borderColor: '#3498db', fill: false, tension: 0.3 },
+        { label: 'IR1', data: [], borderColor: '#f39c12', fill: false, tension: 0.3, borderDash: [5,5] },
+        { label: 'IR2', data: [], borderColor: '#9b59b6', fill: false, tension: 0.3, borderDash: [5,5] }
+      ]
+    };
+    
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: chartData,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 0 },
+        scales: {
+          y: { 
+            beginAtZero: false,
+            grid: { color: 'rgba(255,255,255,0.1)' },
+            ticks: { color: '#888' }
+          },
+          x: { 
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            ticks: { color: '#888', maxTicksLimit: 10 }
+          }
+        },
+        plugins: {
+          legend: { labels: { color: '#eee' } }
+        }
+      }
+    });
+    
+    function addChartData(tc, ir) {
+      const now = new Date().toLocaleTimeString();
+      chartData.labels.push(now);
+      chartData.datasets[0].data.push(tc[0]);
+      chartData.datasets[1].data.push(tc[1]);
+      chartData.datasets[2].data.push(tc[2]);
+      chartData.datasets[3].data.push(ir[0]);
+      chartData.datasets[4].data.push(ir[1]);
+      
+      if (chartData.labels.length > maxDataPoints) {
+        chartData.labels.shift();
+        chartData.datasets.forEach(ds => ds.data.shift());
+      }
+      chart.update('none');
+    }
+    
+    function updateDashboard(data) {
+      // Update mode
+      const modeEl = document.getElementById('modeDisplay');
+      modeEl.textContent = data.mode;
+      modeEl.className = 'mode-badge';
+      if (data.mode.includes('AUTO')) modeEl.classList.add('mode-AUTO');
+      else if (data.mode.includes('PRESET')) modeEl.classList.add('mode-PRESET');
+      else if (data.mode === 'MANUAL') modeEl.classList.add('mode-MANUAL');
+      else modeEl.classList.add('mode-STANDBY');
+      
+      // Update heaters
+      data.heaters.forEach((h, i) => {
+        const idx = i + 1;
+        const card = document.getElementById('heater' + idx);
+        const tempEl = document.getElementById('temp' + idx);
+        
+        // Temperature
+        const temp = data.temperatures.tc[i];
+        tempEl.textContent = (temp !== null) ? temp.toFixed(1) + ' °C' : 'FAULT';
+        tempEl.className = 'temp-display';
+        if (h.fault) tempEl.classList.add('fault');
+        else if (temp > h.max * 0.9) tempEl.classList.add('hot');
+        else tempEl.classList.add('normal');
+        
+        // Card status
+        card.className = 'card heater-card';
+        if (h.fault) card.classList.add('fault');
+        else if (h.cutoff) card.classList.add('cutoff');
+        else if (h.ready) card.classList.add('ready');
+        else if (h.active) card.classList.add('active');
+        
+        // Info
+        document.getElementById('target' + idx).textContent = h.target.toFixed(1) + ' °C';
+        document.getElementById('max' + idx).textContent = h.max.toFixed(1) + ' °C';
+        document.getElementById('power' + idx).textContent = h.power.toFixed(0) + '%';
+        document.getElementById('powerBar' + idx).style.width = h.power + '%';
+        
+        // Status text
+        const statusEl = document.getElementById('status' + idx);
+        if (h.fault) { statusEl.textContent = 'FAULT'; statusEl.className = 'info-value err'; }
+        else if (h.cutoff) { statusEl.textContent = 'CUTOFF'; statusEl.className = 'info-value warn'; }
+        else if (h.ready) { statusEl.textContent = 'READY'; statusEl.className = 'info-value ok'; }
+        else if (h.active && h.power > 0) { statusEl.textContent = 'Heating'; statusEl.className = 'info-value warn'; }
+        else if (h.active) { statusEl.textContent = 'Active'; statusEl.className = 'info-value ok'; }
+        else { statusEl.textContent = 'Inactive'; statusEl.className = 'info-value'; }
+      });
+      
+      // IR sensors
+      document.getElementById('ir1').textContent = (data.temperatures.ir[0] !== null) ? data.temperatures.ir[0].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir2').textContent = (data.temperatures.ir[1] !== null) ? data.temperatures.ir[1].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir1amb').textContent = (data.temperatures.ir_ambient[0] !== null) ? data.temperatures.ir_ambient[0].toFixed(1) + ' °C' : '--';
+      document.getElementById('ir2amb').textContent = (data.temperatures.ir_ambient[1] !== null) ? data.temperatures.ir_ambient[1].toFixed(1) + ' °C' : '--';
+      document.getElementById('probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(1) + ' °C' : '--';
+      document.getElementById('probePeak').textContent = (data.temperatures.probe_peak !== null) ? data.temperatures.probe_peak.toFixed(1) + ' °C' : '--';
+      
+      // WiFi
+      document.getElementById('wifiRssi').textContent = data.wifi.rssi;
+      document.getElementById('ipAddr').textContent = data.wifi.ip;
+      
+      // Warnings
+      const warnPanel = document.getElementById('warningsPanel');
+      const warnList = document.getElementById('warningsList');
+      if (data.warnings.length > 0) {
+        warnPanel.classList.add('visible');
+        warnList.innerHTML = data.warnings.map(w => '<div class="warning-item">⚠️ ' + w + '</div>').join('');
+      } else {
+        warnPanel.classList.remove('visible');
+      }
+      
+      // Add to chart
+      addChartData(data.temperatures.tc, data.temperatures.ir);
+      
+      // Update timestamp
+      document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+    }
+    
+    function fetchData() {
+      const indicator = document.getElementById('updateIndicator');
+      indicator.classList.add('updating');
+      
+      fetch('/api/status')
+        .then(res => res.json())
+        .then(data => {
+          updateDashboard(data);
+          indicator.classList.remove('updating');
+        })
+        .catch(err => {
+          console.error('Fetch error:', err);
+          document.getElementById('lastUpdate').textContent = 'Connection lost...';
+          indicator.classList.remove('updating');
+        });
+    }
+    
+    // Initial fetch and start interval
+    fetchData();
+    setInterval(fetchData, 1000); // Update every 1 second
+  </script>
+</body>
+</html>
+)rawliteral";
     
     request->send(200, "text/html", html);
   });
-  
+
+  // Start OTA and server
   ElegantOTA.begin(&server);
   server.begin();
-  Serial.println("[WiFi] HTTP Server Started");
+  Serial.println("[WiFi] HTTP Server Started with Dashboard");
 }
 
 WiFiConnectionStatus getWiFiStatus() {
@@ -1184,6 +2133,11 @@ void setup_encoder_fixed() {
   pcnt_counter_resume(PCNT_UNIT_0);
 }
 
+void setBrightness(uint8_t val) {
+  int duty = map(val, 0, 100, 0, 255);
+  analogWrite(TFT_BL, duty);
+}
+
 void read_hardware_encoder(float* delta_out) {
   int16_t val = 0;
   if (pcnt_get_counter_value(PCNT_UNIT_0, &val) == ESP_OK) {
@@ -1204,14 +2158,17 @@ void read_hardware_encoder(float* delta_out) {
 
 void saveConfig(const ConfigState& cfg) {
   preferences.putBytes("config", &cfg, sizeof(cfg));
+  setBrightness(cfg.brightness);
 }
 
 void loadConfig(ConfigState& cfg) {
   if (preferences.getBytesLength("config") == sizeof(cfg))
     preferences.getBytes("config", &cfg, sizeof(cfg));
 
-  if (cfg.wifi_config.ssid[0] == 0xFF) { 
-   memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
-   cfg.wifi_config.use_custom = false;
-}
+  if (cfg.wifi_config.ssid[0] == 0xFF) {
+    memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
+    cfg.wifi_config.use_custom = false;
+  }
+
+  if (cfg.brightness == 0 && cfg.wifi_config.use_custom == false) cfg.brightness = 100;
 }

@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 
 enum UIScreen {
+  SCREEN_BOOT,
   SCREEN_STANDBY,
   SCREEN_AUTO_MODE,
   SCREEN_MANUAL_MODE,
@@ -26,6 +27,7 @@ enum UIScreen {
   SCREEN_SETTINGS_TEMP_UNIT,
   SCREEN_SETTINGS_TC_PROBE_CAL,
   SCREEN_SETTINGS_ABOUT,
+  SCREEN_SETTINGS_BRIGHTNESS,
   SCREEN_SETTINGS_WIFI_MENU,        // NEW: WiFi sub-menu
   SCREEN_SETTINGS_WIFI_SSID,        // NEW: SSID entry screen
   SCREEN_SETTINGS_WIFI_PASSWORD,    // NEW: Password entry screen
@@ -37,7 +39,6 @@ enum MenuItemPage1 {
   MENU_PAGE1_CALIBRATION, 
   MENU_PAGE1_EMISSIVITY,
   MENU_PAGE1_TC_PROBE_CAL, 
-  MENU_PAGE1_NEXT_PAGE,
   MENU_PAGE1_ITEM_COUNT 
 };
 
@@ -46,15 +47,14 @@ enum MenuItemPage2 {
   MENU_PAGE2_STARTUP,  
   MENU_PAGE2_SOUND,
   MENU_PAGE2_TEMP_UNIT,
+  MENU_PAGE2_BRIGHTNESS,
   MENU_PAGE2_ABOUT,
-  MENU_PAGE2_NEXT_PAGE,   // Changed from PREV to NEXT
   MENU_PAGE2_ITEM_COUNT
 };
 
 // NEW: Page 3 menu items
 enum MenuItemPage3 {
   MENU_PAGE3_WIFI_SETTINGS,
-  MENU_PAGE3_NEXT_PAGE,
   MENU_PAGE3_ITEM_COUNT
 };
 
@@ -105,11 +105,13 @@ struct ConfigState {
   IdleOffMode idle_off_mode;
   bool light_on;
   bool sound_on;
+  uint8_t sound_volume;
   bool heater_active[3];
   float tc_offsets[3];
   float tc_probe_offset;
   StartupMode startup_mode;
   float ir_emissivity[2];
+  uint8_t brightness;
   WiFiConfig wifi_config;  // NEW: WiFi settings
 };
 
@@ -119,6 +121,7 @@ struct AppState {
   float tc_probe_peak;
   float ir_temps[2];
   float ir_ambient[2];
+  float heater_power[3];
   bool is_heating_active;
   float target_temp;
   char temp_unit;
@@ -134,6 +137,7 @@ struct AppState {
   bool manual_was_started;
   uint8_t manual_preset_index;
   char ip_address[20];
+  bool is_warning;
 };
 
 enum QuickEditStep {
@@ -171,8 +175,6 @@ public:
   int getManualSelection() const { return _manual_selection; }
   int getManualConfirmedPreset() const { return _manual_confirmed_preset; }
   void setManualConfirmedPreset(int preset) { _manual_confirmed_preset = preset; }
-
-  // NEW: WiFi callback setter
   void setWiFiReconnectCallback(WiFiReconnectCallback callback) { _wifi_reconnect_callback = callback; }
 
 private:
@@ -181,13 +183,13 @@ private:
   UIScreen _current_screen;
   UIScreen _previous_screen;
   QuickEditStep _quick_edit_step;
-
+  
   bool _blink_state;
   bool _is_editing_calibration;
   int _selected_menu_item; 
   int _selected_menu_item_page_2; 
-  int _selected_menu_item_page_3;   // NEW: Page 3 selection
-  int _selected_wifi_menu_item;      // NEW: WiFi menu selection
+  int _selected_menu_item_page_3;  
+  int _selected_wifi_menu_item;      
   float _menu_step_accumulator;
   float _temp_edit_value;
   
@@ -197,6 +199,7 @@ private:
   int _manual_confirmed_preset;
   bool _show_warning;
   
+  uint32_t _boot_start_time;
   uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
@@ -229,24 +232,25 @@ private:
   void drawSettingsTCProbeCal(const AppState& state, const ConfigState& config);
   void drawSettingsTempUnit(const AppState& state, const ConfigState& config);
   void drawSettingsAbout(const AppState& state);
+  void drawSettingsBrightness(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
   void drawManualModeScreen(const AppState& state, const ConfigState& config);
 
-  // NEW: WiFi settings screens
   void drawSettingsWiFiMenu(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiSSID(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiPassword(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiStatus(const AppState& state, const ConfigState& config);
   void drawCharEntryScreen(const char* title, bool is_password);
-
+  void drawBootScreen();
   void drawTaskBar();
   void drawHeader(const char* title); 
 
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
   float convertDelta(float temp_c, char unit);
-
+  uint32_t _last_cursor_move_time;
+  bool _show_cursor;
   uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 };
 
