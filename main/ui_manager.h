@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 
 enum UIScreen {
+  SCREEN_BOOT,
   SCREEN_STANDBY,
   SCREEN_AUTO_MODE,
   SCREEN_MANUAL_MODE,
@@ -120,6 +121,7 @@ struct AppState {
   float tc_probe_peak;
   float ir_temps[2];
   float ir_ambient[2];
+  float heater_power[3];
   bool is_heating_active;
   float target_temp;
   char temp_unit;
@@ -181,13 +183,13 @@ private:
   UIScreen _current_screen;
   UIScreen _previous_screen;
   QuickEditStep _quick_edit_step;
-
+  
   bool _blink_state;
   bool _is_editing_calibration;
   int _selected_menu_item; 
   int _selected_menu_item_page_2; 
-  int _selected_menu_item_page_3;   // NEW: Page 3 selection
-  int _selected_wifi_menu_item;      // NEW: WiFi menu selection
+  int _selected_menu_item_page_3;  
+  int _selected_wifi_menu_item;      
   float _menu_step_accumulator;
   float _temp_edit_value;
   
@@ -197,6 +199,7 @@ private:
   int _manual_confirmed_preset;
   bool _show_warning;
   
+  uint32_t _boot_start_time;
   uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
@@ -234,20 +237,20 @@ private:
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
   void drawManualModeScreen(const AppState& state, const ConfigState& config);
 
-  // NEW: WiFi settings screens
   void drawSettingsWiFiMenu(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiSSID(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiPassword(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiStatus(const AppState& state, const ConfigState& config);
   void drawCharEntryScreen(const char* title, bool is_password);
-
+  void drawBootScreen();
   void drawTaskBar();
   void drawHeader(const char* title); 
 
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);
   float convertDelta(float temp_c, char unit);
-
+  uint32_t _last_cursor_move_time;
+  bool _show_cursor;
   uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 };
 

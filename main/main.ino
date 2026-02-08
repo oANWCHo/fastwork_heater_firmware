@@ -1025,12 +1025,13 @@ void TaskInput(void* pvParameters) {
           ui.handleButtonSingleClick(config, go_to, has_go_to);
           if (scr == SCREEN_MANUAL_MODE) {
             sysState.manual_preset_index = ui.getManualConfirmedPreset();
-
-            sysState.manual_preset_running = true;
-            sysState.manual_was_started = true;
-            sysState.auto_was_started = false;
-            sysState.auto_step = 0;
-            has_go_to = true;
+            if (has_go_to) {
+               sysState.manual_preset_running = true;
+               sysState.manual_was_started = true;
+               
+               sysState.auto_was_started = false;
+               sysState.auto_step = 0;
+            }
           }
           xSemaphoreGive(dataMutex);
         }
@@ -1159,6 +1160,18 @@ void TaskDisplay(void* pvParameters) {
     bool lock_active = false;
     bool all_sensors_ok = true;
 
+    uint32_t on_ticks[3];
+    uint32_t window;
+
+    portENTER_CRITICAL(&tpoMux);
+    for(int i=0; i<3; i++) on_ticks[i] = tpo_on_ticks[i];
+    window = tpo_window_period_ticks;
+    portEXIT_CRITICAL(&tpoMux);
+
+    for(int i=0; i<3; i++) {
+       st.heater_power[i] = (window > 0) ? (on_ticks[i] * 100.0f / window) : 0.0f;
+    }
+    
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       if (ui.checkInactivity(config, has_go_to, go_to)) {
         beep_mode = 1;
