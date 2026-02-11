@@ -1,4 +1,6 @@
 #include "ui_manager.h"
+#include "Arial30.h"
+#include "Arial24.h"
 #include "Arial20.h"
 #include "Arial18.h"
 #include "Arial12.h"
@@ -1832,9 +1834,9 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
 
     // 1. วัดความกว้างตัวเลข (Font ใหญ่)
-    _spr.loadFont(Arial20);
+    _spr.loadFont(Arial30);
     int val_width = _spr.textWidth(val_buf);
-    _spr.loadFont(Arial20);// do not change
+    _spr.loadFont(Arial30);// do not change
     int unit_width = _spr.textWidth(unit_str);
 
     // 2. คำนวณความกว้างรวม (ตัวเลข + ช่องว่างเล็กน้อย + หน่วย) เพื่อหาจุดเริ่มวาดให้กึ่งกลางกล่องพอดี
@@ -1843,7 +1845,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
 
     // 3. วาดตัวเลข - ไล่สีตามอุณหภูมิอิงจาก max_temp ของ heater นั้นๆ
     //    เขียว(เย็น) -> เหลือง(กลาง) -> ส้ม -> แดง(ร้อนเกิน max)
-    _spr.loadFont(Arial20);
+    _spr.loadFont(Arial30);
     _spr.setTextDatum(TL_DATUM);
     
     uint16_t temp_color;
@@ -1890,7 +1892,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     _spr.drawString(val_buf, start_x, card_y + 35);
 
     // 4. วาดหน่วย (Font ใหญ่) ต่อท้ายตัวเลขทันที - ใช้สีเดียวกับตัวเลข
-    _spr.loadFont(Arial20); // do not change
+    _spr.loadFont(Arial30); // do not change
     _spr.setTextColor(temp_color, bg_color); 
     _spr.drawString(unit_str, start_x + val_width + 2, card_y + 35); 
     // --- [จบส่วนแก้ไข Dynamic Alignment] ---
@@ -2100,7 +2102,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
       val_color = color565(tr, tg, tb);
     }
 
-    _spr.loadFont(Arial18);
+    _spr.loadFont(Arial30);
     _spr.setTextColor(val_color, bg);
     _spr.setTextDatum(TC_DATUM);
     snprintf(buf, 20, "%.0f %c", convertTemp(val_to_show, state.temp_unit), unit_char);
