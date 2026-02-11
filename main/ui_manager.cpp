@@ -1,4 +1,7 @@
 #include "ui_manager.h"
+#include "Arial30.h"
+#include "Arial24.h"
+#include "Arial20.h"
 #include "Arial18.h"
 #include "Arial12.h"
 #include "taskbar_icons.h"
@@ -23,19 +26,19 @@ enum WiFiConnectionStatus {
 #define C_NORMAL_BG TFT_BLACK
 
 // Settings Theme (matches Auto/Manual/Standby light theme)
-#define C_SET_BG        0xE7F9  // Light cream background
-#define C_SET_CARD_BG   0xFFFF  // White card background
-#define C_SET_CARD_BRD  0xC618  // Light grey card border
-#define C_SET_SEL_BG    0x2B09  // Dark olive green (selected item bg)
+#define C_SET_BG       0xE7FB  // #f5faf0 - Light green-white background
+#define C_SET_CARD_BG   0x9E51  // #d9ead1 - Light green menu item bg (unselected)
+#define C_SET_CARD_BRD  0xDF77  // same as card bg (subtle)
+#define C_SET_SEL_BG    0x3289  // #345127 - Dark green (selected item bg)
 #define C_SET_SEL_TXT   0xFFFF  // White text on selected
 #define C_SET_NORM_TXT  0x2104  // Dark text on normal items
-#define C_SET_TITLE     0x2500  // Dark green title color
+#define C_SET_TITLE     0x0000  // #000000 Black title
 #define C_SET_FOOTER    0x4B29  // Muted green footer text
-#define C_SET_SCROLLBAR 0xBDF7  // Light grey scrollbar track
-#define C_SET_SCROLL_TH 0x7BCF  // Darker grey scrollbar thumb
+#define C_SET_SCROLLBAR 0xDF77  // #d9ead1 scrollbar track
+#define C_SET_SCROLL_TH 0x3289  // #345127 scrollbar thumb (dark green)
 #define C_SET_CHEVRON   0x7BCF  // Grey chevron color
 #define C_SET_VALUE_TXT 0x7BCF  // Grey value/info text
-#define C_SET_ACCENT    0x24C0  // Green accent (active indicators)
+#define C_SET_ACCENT    0x3289  // #345127 accent (active indicators)
 
 #define C_WHITE 0xFFFF
 #define C_GREY_BG 0xACB9
@@ -86,6 +89,14 @@ const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
 
 // [ADDED] Page 3 Labels
 const char* menu_item_labels_page_3[MENU_PAGE3_ITEM_COUNT] = {
+  "WiFi Settings"
+};
+
+// Unified settings menu labels (all pages combined)
+const int SETTINGS_TOTAL_ITEMS = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
+const char* settings_all_labels[] = {
+  "Max Temp Lock", "Heater Calibration", "IR Emissivity", "TC Probe Cal",
+  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness", "About",
   "WiFi Settings"
 };
 
@@ -250,6 +261,11 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
   }
   if (millis() - _last_cursor_move_time > 5000) {
     _show_cursor = false;
+  }
+
+  if (_current_screen == SCREEN_SETTINGS_WIFI_SSID || 
+      _current_screen == SCREEN_SETTINGS_WIFI_PASSWORD) {
+    _show_cursor = true; 
   }
 
   // Warning Logic
@@ -446,9 +462,17 @@ void UIManager::drawSettingsPage1(const AppState& state, const ConfigState& conf
   int footer_y = _spr.height() - 18;
   int max_visible = (footer_y - Y_START) / ITEM_SPACING;
 
-  for (int i = 0; i < MENU_PAGE1_ITEM_COUNT; ++i) {
-    int y = Y_START + i * ITEM_SPACING;
-    if (i >= max_visible) break;
+  // _selected_menu_item is now global index (0..SETTINGS_TOTAL_ITEMS-1)
+  int scroll_offset = 0;
+  if (_selected_menu_item >= max_visible) {
+    scroll_offset = _selected_menu_item - max_visible + 1;
+  }
+
+  for (int i = 0; i < SETTINGS_TOTAL_ITEMS; ++i) {
+    int vi = i - scroll_offset;
+    if (vi < 0 || vi >= max_visible) continue;
+    int y = Y_START + vi * ITEM_SPACING;
+
     bool sel = (i == _selected_menu_item);
     uint16_t bg = sel ? C_SET_SEL_BG : C_SET_CARD_BG;
     uint16_t txt = sel ? C_SET_SEL_TXT : C_SET_NORM_TXT;
@@ -459,7 +483,7 @@ void UIManager::drawSettingsPage1(const AppState& state, const ConfigState& conf
     _spr.setTextColor(txt, bg);
     _spr.setTextDatum(ML_DATUM);
     _spr.loadFont(Arial18);
-    _spr.drawString(menu_item_labels_page_1[i], X_MARGIN + 14, y + ITEM_HEIGHT / 2);
+    _spr.drawString(settings_all_labels[i], X_MARGIN + 14, y + ITEM_HEIGHT / 2);
     // Chevron
     _spr.setTextDatum(MR_DATUM);
     _spr.setTextColor(sel ? C_SET_SEL_TXT : C_SET_CHEVRON, bg);
@@ -467,88 +491,18 @@ void UIManager::drawSettingsPage1(const AppState& state, const ConfigState& conf
     _spr.unloadFont();
   }
 
-  // Scrollbar (position across all 3 pages: page1 items 0..3, page2 items 4..9, page3 items 10)
-  int total = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
-  drawSettingsScrollbar(&_spr, _selected_menu_item, total, Y_START, Y_START + max_visible * ITEM_SPACING);
-
+  drawSettingsScrollbar(&_spr, _selected_menu_item, SETTINGS_TOTAL_ITEMS, Y_START, Y_START + max_visible * ITEM_SPACING);
   drawSettingsFooter3(&_spr, "Rot: Select", "Press: OK", "Hold: Back");
 }
 
 void UIManager::drawSettingsPage2(const AppState& state, const ConfigState& config) {
-  drawHeader("SETTING");
-  const int ITEM_HEIGHT = 36, ITEM_SPACING = 40, X_MARGIN = 8, Y_START = 58;
-  int w = _spr.width() - (2 * X_MARGIN) - 12;
-  int footer_y = _spr.height() - 18;
-  int max_visible = (footer_y - Y_START) / ITEM_SPACING;  // how many items fit
-
-  // Scroll offset to keep selected item visible
-  int scroll_offset = 0;
-  if (_selected_menu_item_page_2 >= max_visible) {
-    scroll_offset = _selected_menu_item_page_2 - max_visible + 1;
-  }
-
-  for (int i = 0; i < MENU_PAGE2_ITEM_COUNT; ++i) {
-    int vi = i - scroll_offset;  // visual index
-    if (vi < 0 || vi >= max_visible) continue;
-    int y = Y_START + vi * ITEM_SPACING;
-
-    bool sel = (i == _selected_menu_item_page_2);
-    uint16_t bg = sel ? C_SET_SEL_BG : C_SET_CARD_BG;
-    uint16_t txt = sel ? C_SET_SEL_TXT : C_SET_NORM_TXT;
-
-    _spr.fillRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, bg);
-    if (!sel) _spr.drawRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, C_SET_CARD_BRD);
-
-    _spr.setTextColor(txt, bg);
-    _spr.setTextDatum(ML_DATUM);
-    _spr.loadFont(Arial18);
-    _spr.drawString(menu_item_labels_page_2[i], X_MARGIN + 14, y + ITEM_HEIGHT / 2);
-    _spr.setTextDatum(MR_DATUM);
-    _spr.setTextColor(sel ? C_SET_SEL_TXT : C_SET_CHEVRON, bg);
-    _spr.drawString(">", X_MARGIN + w - 10, y + ITEM_HEIGHT / 2);
-    _spr.unloadFont();
-  }
-
-  int total = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
-  int global_idx = MENU_PAGE1_ITEM_COUNT + _selected_menu_item_page_2;
-  drawSettingsScrollbar(&_spr, global_idx, total, Y_START, Y_START + max_visible * ITEM_SPACING);
-
-  drawSettingsFooter3(&_spr, "Rot: Select", "Press: OK", "Hold: Back");
+  // Unified: redirect to page 1 drawing (all items in one list)
+  drawSettingsPage1(state, config);
 }
 
-// [ADDED] Page 3 Drawing
+// [ADDED] Page 3 Drawing - unified redirect
 void UIManager::drawSettingsPage3(const AppState& state, const ConfigState& config) {
-  drawHeader("SETTING");
-  const int ITEM_HEIGHT = 36, ITEM_SPACING = 40, X_MARGIN = 8, Y_START = 58;
-  int w = _spr.width() - (2 * X_MARGIN) - 12;
-  int footer_y = _spr.height() - 18;
-  int max_visible = (footer_y - Y_START) / ITEM_SPACING;
-
-  for (int i = 0; i < MENU_PAGE3_ITEM_COUNT; ++i) {
-    int y = Y_START + i * ITEM_SPACING;
-    if (i >= max_visible) break;
-    bool sel = (i == _selected_menu_item_page_3);
-    uint16_t bg = sel ? C_SET_SEL_BG : C_SET_CARD_BG;
-    uint16_t txt = sel ? C_SET_SEL_TXT : C_SET_NORM_TXT;
-
-    _spr.fillRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, bg);
-    if (!sel) _spr.drawRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, C_SET_CARD_BRD);
-
-    _spr.setTextColor(txt, bg);
-    _spr.setTextDatum(ML_DATUM);
-    _spr.loadFont(Arial18);
-    _spr.drawString(menu_item_labels_page_3[i], X_MARGIN + 14, y + ITEM_HEIGHT / 2);
-    _spr.setTextDatum(MR_DATUM);
-    _spr.setTextColor(sel ? C_SET_SEL_TXT : C_SET_CHEVRON, bg);
-    _spr.drawString(">", X_MARGIN + w - 10, y + ITEM_HEIGHT / 2);
-    _spr.unloadFont();
-  }
-
-  int total = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
-  int global_idx = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + _selected_menu_item_page_3;
-  drawSettingsScrollbar(&_spr, global_idx, total, Y_START, Y_START + max_visible * ITEM_SPACING);
-
-  drawSettingsFooter3(&_spr, "Rot: Select", "Press: OK", "Hold: Back");
+  drawSettingsPage1(state, config);
 }
 
 // [ADDED] WiFi Menu Drawing
@@ -668,7 +622,7 @@ void UIManager::drawCharEntryScreen(const char* title, bool is_password) {
         _spr.setTextColor(TFT_BLACK, _blink_state ? TFT_CYAN : TFT_BLUE);
       } else {
         _spr.fillRect(x - 1, TEXT_Y - 2, CHAR_WIDTH, CHAR_HEIGHT, TFT_YELLOW);
-        _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
+        _spr.setTextColor(TFT_WHITE, C_SET_SEL_BG);
       }
     } else {
       _spr.setTextColor(C_SET_NORM_TXT, C_SET_CARD_BG);
@@ -707,13 +661,13 @@ void UIManager::drawCharEntryScreen(const char* title, bool is_password) {
 
       if (i == 0) {
         // Selected Item
-        _spr.fillRect(x - 10, selector_y + 5, 20, 40, C_SET_ACCENT);
+        _spr.fillRect(x - 10, selector_y + 5, 20, 40, TFT_YELLOW);
         if (is_del) {
-          _spr.setTextColor(TFT_RED, C_SET_ACCENT);
+          _spr.setTextColor(TFT_RED, TFT_YELLOW);
           _spr.drawString("<", x, selector_y + 25);  // ใช้เครื่องหมาย < แทน Backspace
         } else {
           char str[2] = { charset[idx], '\0' };
-          _spr.setTextColor(TFT_WHITE, C_SET_ACCENT);
+          _spr.setTextColor(TFT_BLACK, TFT_YELLOW);
           _spr.drawString(str, x, selector_y + 25);
         }
       } else {
@@ -975,7 +929,7 @@ void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState&
     _spr.drawString(buf, _spr.width() / 2, info_y + 56);
   }
 
-  int start_y = 155;
+  int start_y = 140;
   const char* options[] = { "Tare (Set 0)", "Reset (0.0)" };
   int w = _spr.width() - 40;
   int h = 34;
@@ -1165,65 +1119,74 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       }
       return true;
     case SCREEN_SETTINGS_PAGE_1:
-      switch (_selected_menu_item) {
-        case MENU_PAGE1_MAX_TEMP_LOCK:
-          _current_screen = SCREEN_SETTINGS_MAX_TEMP_LOCK;
-          _temp_edit_value = config.max_temp_lock;
-          break;
-        case MENU_PAGE1_CALIBRATION:
-          _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT;
-          _selected_menu_item = 0;
-          _is_editing_calibration = false;
-          break;
-        case MENU_PAGE1_EMISSIVITY:
-          _current_screen = SCREEN_SETTINGS_EMISSIVITY;
-          _selected_menu_item = 0;
-          break;
-        case MENU_PAGE1_TC_PROBE_CAL:
-          _current_screen = SCREEN_SETTINGS_TC_PROBE_CAL;
-          _selected_menu_item = 0;
-          break;
-      }
-      _menu_step_accumulator = 0.0f;
-      return true;
     case SCREEN_SETTINGS_PAGE_2:
-      switch (_selected_menu_item_page_2) {
-        case MENU_PAGE2_IDLE_OFF:
-          _current_screen = SCREEN_SETTINGS_IDLE_OFF;
-          _selected_menu_item = config.idle_off_mode;
-          break;
-        case MENU_PAGE2_STARTUP:
-          _current_screen = SCREEN_SETTINGS_STARTUP;
-          _selected_menu_item = (int)config.startup_mode;
-          if (_selected_menu_item >= STARTUP_MODE_COUNT) _selected_menu_item = 0;
-          break;
-        case MENU_PAGE2_SOUND:
-          _current_screen = SCREEN_SETTINGS_SOUND;
-          _temp_edit_value = (float)config.sound_volume;  // โหลดค่า Volume ปัจจุบันมาแก้ไข
-          break;
-        case MENU_PAGE2_TEMP_UNIT:
-          _current_screen = SCREEN_SETTINGS_TEMP_UNIT;
-          _selected_menu_item = (config.temp_unit == 'C') ? 0 : 1;
-          break;
-        case MENU_PAGE2_BRIGHTNESS:
-          _current_screen = SCREEN_SETTINGS_BRIGHTNESS;
-          _temp_edit_value = (float)config.brightness;
-          break;
-        case MENU_PAGE2_ABOUT: _current_screen = SCREEN_SETTINGS_ABOUT; break;
-      }
-      _menu_step_accumulator = 0.0f;
-      return true;
-
-    // [ADDED] Page 3 Handler
     case SCREEN_SETTINGS_PAGE_3:
-      switch (_selected_menu_item_page_3) {
-        case MENU_PAGE3_WIFI_SETTINGS:
-          _current_screen = SCREEN_SETTINGS_WIFI_MENU;
-          _selected_wifi_menu_item = 0;
-          break;
+    {
+      // Unified: _selected_menu_item is global index
+      int idx = _selected_menu_item;
+      
+      // Page 1 items: 0..3
+      if (idx < MENU_PAGE1_ITEM_COUNT) {
+        switch (idx) {
+          case MENU_PAGE1_MAX_TEMP_LOCK:
+            _current_screen = SCREEN_SETTINGS_MAX_TEMP_LOCK;
+            _temp_edit_value = config.max_temp_lock;
+            break;
+          case MENU_PAGE1_CALIBRATION:
+            _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT;
+            _is_editing_calibration = false;
+            break;
+          case MENU_PAGE1_EMISSIVITY:
+            _current_screen = SCREEN_SETTINGS_EMISSIVITY;
+            break;
+          case MENU_PAGE1_TC_PROBE_CAL:
+            _current_screen = SCREEN_SETTINGS_TC_PROBE_CAL;
+            break;
+        }
+      }
+      // Page 2 items: 4..9
+      else if (idx < MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT) {
+        int p2_idx = idx - MENU_PAGE1_ITEM_COUNT;
+        switch (p2_idx) {
+          case MENU_PAGE2_IDLE_OFF:
+            _current_screen = SCREEN_SETTINGS_IDLE_OFF;
+            _selected_menu_item = config.idle_off_mode;
+            break;
+          case MENU_PAGE2_STARTUP:
+            _current_screen = SCREEN_SETTINGS_STARTUP;
+            _selected_menu_item = (int)config.startup_mode;
+            if (_selected_menu_item >= STARTUP_MODE_COUNT) _selected_menu_item = 0;
+            break;
+          case MENU_PAGE2_SOUND:
+            _current_screen = SCREEN_SETTINGS_SOUND;
+            _temp_edit_value = (float)config.sound_volume;
+            break;
+          case MENU_PAGE2_TEMP_UNIT:
+            _current_screen = SCREEN_SETTINGS_TEMP_UNIT;
+            _selected_menu_item = (config.temp_unit == 'C') ? 0 : 1;
+            break;
+          case MENU_PAGE2_BRIGHTNESS:
+            _current_screen = SCREEN_SETTINGS_BRIGHTNESS;
+            _temp_edit_value = (float)config.brightness;
+            break;
+          case MENU_PAGE2_ABOUT:
+            _current_screen = SCREEN_SETTINGS_ABOUT;
+            break;
+        }
+      }
+      // Page 3 items: 10+
+      else {
+        int p3_idx = idx - MENU_PAGE1_ITEM_COUNT - MENU_PAGE2_ITEM_COUNT;
+        switch (p3_idx) {
+          case MENU_PAGE3_WIFI_SETTINGS:
+            _current_screen = SCREEN_SETTINGS_WIFI_MENU;
+            _selected_wifi_menu_item = 0;
+            break;
+        }
       }
       _menu_step_accumulator = 0.0f;
       return true;
+    }
 
     // [ADDED] WiFi Menu Handler
     case SCREEN_SETTINGS_WIFI_MENU:
@@ -1250,7 +1213,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
         case WIFI_MENU_CONNECT:
           if (_wifi_reconnect_callback) _wifi_reconnect_callback();
           break;
-        case WIFI_MENU_BACK: _current_screen = SCREEN_SETTINGS_PAGE_3; break;
+        case WIFI_MENU_BACK:
+          _current_screen = SCREEN_SETTINGS_PAGE_1;
+          _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_WIFI_SETTINGS;
+          break;
       }
       _menu_step_accumulator = 0.0f;
       return true;
@@ -1303,7 +1269,8 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
     case SCREEN_SETTINGS_BRIGHTNESS:
       config.brightness = (uint8_t)_temp_edit_value;
       if (_save_callback) _save_callback(config);
-      _current_screen = SCREEN_SETTINGS_PAGE_2;
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_BRIGHTNESS;
       _menu_step_accumulator = 0.0f;
       return true;
 
@@ -1367,6 +1334,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       config.max_temps[_selected_menu_item] = _temp_edit_value;
       if (_save_callback) _save_callback(config);
       _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_CALIBRATION;
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_CALIBRATION_SELECT:
@@ -1381,24 +1349,28 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       config.max_temp_lock = _temp_edit_value;
       if (_save_callback) _save_callback(config);
       _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_MAX_TEMP_LOCK;
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_IDLE_OFF:
       config.idle_off_mode = (IdleOffMode)_selected_menu_item;
       if (_save_callback) _save_callback(config);
-      _current_screen = SCREEN_SETTINGS_PAGE_2;
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_IDLE_OFF;
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_SOUND:
-      config.sound_volume = (uint8_t)_temp_edit_value;  // บันทึกค่าความดัง
+      config.sound_volume = (uint8_t)_temp_edit_value;
       if (_save_callback) _save_callback(config);
-      _current_screen = SCREEN_SETTINGS_PAGE_2;
-      _menu_step_accumulator = 0.0f;  // Reset accumulator
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_SOUND;
+      _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_STARTUP:
       config.startup_mode = (StartupMode)_selected_menu_item;
       if (_save_callback) _save_callback(config);
-      _current_screen = SCREEN_SETTINGS_PAGE_2;
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_STARTUP;
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_EMISSIVITY:
@@ -1407,11 +1379,15 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       return true;
     case SCREEN_SETTINGS_TEMP_UNIT:
       config.temp_unit = (_selected_menu_item == 0) ? 'C' : 'F';
-      _current_screen = SCREEN_SETTINGS_PAGE_2;
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_TEMP_UNIT;
       if (_save_callback) _save_callback(config);
       _menu_step_accumulator = 0.0f;
       return true;
-    case SCREEN_SETTINGS_ABOUT: _current_screen = SCREEN_SETTINGS_PAGE_2; return true;
+    case SCREEN_SETTINGS_ABOUT:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ABOUT;
+      return true;
     default: return false;
   }
 }
@@ -1432,25 +1408,55 @@ bool UIManager::handleButtonHold(ConfigState& config) {
     case SCREEN_SETTINGS_PAGE_2:
     case SCREEN_SETTINGS_PAGE_3: _current_screen = SCREEN_STANDBY; break;
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP:
-    case SCREEN_SETTINGS_MAX_TEMP_LOCK: _current_screen = SCREEN_SETTINGS_PAGE_1; break;
+    case SCREEN_SETTINGS_MAX_TEMP_LOCK:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_MAX_TEMP_LOCK;
+      break;
     case SCREEN_SETTINGS_HEATER_MAX_TEMP:
       _current_screen = SCREEN_SETTINGS_HEATER_TARGET_TEMP;
       _temp_edit_value = config.target_temps[_selected_menu_item];
       break;
     case SCREEN_SETTINGS_CALIBRATION_SELECT:
       if (_is_editing_calibration) _is_editing_calibration = false;
-      else _current_screen = SCREEN_SETTINGS_PAGE_1;
+      else { _current_screen = SCREEN_SETTINGS_PAGE_1; _selected_menu_item = MENU_PAGE1_CALIBRATION; }
       break;
     case SCREEN_SETTINGS_HEATER_CALIBRATE: _current_screen = SCREEN_SETTINGS_CALIBRATION_SELECT; break;
-    case SCREEN_SETTINGS_EMISSIVITY: _current_screen = SCREEN_SETTINGS_PAGE_1; break;
+    case SCREEN_SETTINGS_EMISSIVITY:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_EMISSIVITY;
+      break;
     case SCREEN_SETTINGS_IDLE_OFF:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_IDLE_OFF;
+      break;
     case SCREEN_SETTINGS_STARTUP:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_STARTUP;
+      break;
     case SCREEN_SETTINGS_TEMP_UNIT:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_TEMP_UNIT;
+      break;
     case SCREEN_SETTINGS_SOUND:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_SOUND;
+      break;
     case SCREEN_SETTINGS_TC_PROBE_CAL:
-    case SCREEN_SETTINGS_ABOUT: _current_screen = SCREEN_SETTINGS_PAGE_2; break;
-    case SCREEN_SETTINGS_BRIGHTNESS: _current_screen = SCREEN_SETTINGS_PAGE_2; break;
-    case SCREEN_SETTINGS_WIFI_MENU: _current_screen = SCREEN_SETTINGS_PAGE_3; break;
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_TC_PROBE_CAL;
+      break;
+    case SCREEN_SETTINGS_ABOUT:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ABOUT;
+      break;
+    case SCREEN_SETTINGS_BRIGHTNESS:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_BRIGHTNESS;
+      break;
+    case SCREEN_SETTINGS_WIFI_MENU:
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_WIFI_SETTINGS;
+      break;
     case SCREEN_SETTINGS_WIFI_STATUS: _current_screen = SCREEN_SETTINGS_WIFI_MENU; break;
     case SCREEN_SETTINGS_WIFI_SSID:
       if (_char_entry_editing) {
@@ -1571,51 +1577,16 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         break;
       }
     case SCREEN_SETTINGS_PAGE_1:
-      {
-        int new_pos = _selected_menu_item + change;
-
-        if (new_pos >= MENU_PAGE1_ITEM_COUNT) {
-          _current_screen = SCREEN_SETTINGS_PAGE_2;
-          _selected_menu_item_page_2 = 0;
-          return true;
-        }
-        if (new_pos < 0) new_pos = 0;
-
-        _selected_menu_item = new_pos;
-        break;
-      }
     case SCREEN_SETTINGS_PAGE_2:
-      {
-        int new_pos = _selected_menu_item_page_2 + change;
-
-        if (new_pos >= MENU_PAGE2_ITEM_COUNT) {
-          _current_screen = SCREEN_SETTINGS_PAGE_3;
-          _selected_menu_item_page_3 = 0;
-          return true;
-        }
-        if (new_pos < 0) {
-          _current_screen = SCREEN_SETTINGS_PAGE_1;
-          _selected_menu_item = MENU_PAGE1_ITEM_COUNT - 1;
-          return true;
-        }
-        _selected_menu_item_page_2 = new_pos;
-        break;
-      }
     case SCREEN_SETTINGS_PAGE_3:
       {
-        int new_pos = _selected_menu_item_page_3 + change;
-
-        // ถ้าหมุนเกินตัวสุดท้าย -> หยุด (เพราะหมดหน้าแล้ว)
-        if (new_pos >= MENU_PAGE3_ITEM_COUNT) new_pos = MENU_PAGE3_ITEM_COUNT - 1;
-
-        // ถ้าหมุนถอยหลังเกินตัวแรก -> กลับไปหน้า 2 บรรทัดสุดท้าย
-        if (new_pos < 0) {
-          _current_screen = SCREEN_SETTINGS_PAGE_2;
-          _selected_menu_item_page_2 = MENU_PAGE2_ITEM_COUNT - 1;
-          return true;
-        }
-
-        _selected_menu_item_page_3 = new_pos;
+        // Unified scrolling: _selected_menu_item is global index 0..SETTINGS_TOTAL_ITEMS-1
+        int new_pos = _selected_menu_item + change;
+        if (new_pos < 0) new_pos = 0;
+        if (new_pos >= SETTINGS_TOTAL_ITEMS) new_pos = SETTINGS_TOTAL_ITEMS - 1;
+        _selected_menu_item = new_pos;
+        // Keep screen on PAGE_1 (unified drawing)
+        _current_screen = SCREEN_SETTINGS_PAGE_1;
         break;
       }
     case SCREEN_SETTINGS_WIFI_MENU:
@@ -1766,23 +1737,46 @@ uint16_t UIManager::getStatusColor(bool is_active, float current_temp, float tar
 void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& config) {
   drawTaskBar(); 
 
-  #define C_BG_LIGHT 0xE7F9 
-  #define C_CARD_OFF 0xE71C 
-  
-  int top_y = 24; 
-  _spr.fillRect(0, top_y, _spr.width(), _spr.height() - top_y, C_BG_LIGHT);
+  // --- สีใหม่สำหรับ Manual Mode ---
+  // #09904B => color565(0x09, 0x90, 0x4B) = green accent for title/cursor
+  uint16_t C_MANUAL_GREEN  = color565(0x09, 0x90, 0x4B);  // #09904B
+  // #f2ffee => color565(0xF2, 0xFF, 0xEE) = light green card bg (OFF state)
+  uint16_t C_CARD_HIGHLIGHT = color565(0xF2, 0xFF, 0xEE);  // #f2ffee
+  // #C7E7B9 => เข้มขึ้น
+  uint16_t C_BG_BOTTOM     = color565(0x4A, 0x9A, 0x40);  // #4A9A40 (เข้มขึ้นอีก)
+
+  int top_y = 24;
+  int screen_h = _spr.height() - top_y;
+  int screen_w = _spr.width();
+
+  // --- Background gradient: white (top) -> #4A9A40 (bottom, darker green) ---
+  for (int row = 0; row < screen_h; row++) {
+    float t = (float)row / (float)(screen_h - 1);
+    uint8_t r = 255 - (uint8_t)(t * (255 - 0x4A));
+    uint8_t g = 255 - (uint8_t)(t * (255 - 0x9A));
+    uint8_t b = 255 - (uint8_t)(t * (255 - 0x40));
+    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
+  }
 
   // --- Title Section ---
   int title_x = 10;
   int title_y = top_y + 5;
+
+  // สี gradient ที่ตำแหน่ง title_y สำหรับใช้เป็น bg text
+  float t_title = (float)(title_y - top_y) / (float)(screen_h - 1);
+  uint8_t bg_r = 255 - (uint8_t)(t_title * (255 - 0x4A));
+  uint8_t bg_g = 255 - (uint8_t)(t_title * (255 - 0x9A));
+  uint8_t bg_b = 255 - (uint8_t)(t_title * (255 - 0x40));
+  uint16_t title_bg = color565(bg_r, bg_g, bg_b);
+
   _spr.loadFont(Arial12);
-  _spr.setTextColor(0x2500, C_BG_LIGHT); 
+  _spr.setTextColor(C_MANUAL_GREEN, title_bg);
   _spr.setTextDatum(TL_DATUM);
   _spr.drawString("MODE", title_x, title_y);
   _spr.unloadFont();
   
   _spr.loadFont(Arial18);
-  _spr.setTextColor(TFT_BLUE, C_BG_LIGHT);
+  _spr.setTextColor(C_MANUAL_GREEN, title_bg);  // #09904B สำหรับคำว่า MANUAL
   _spr.drawString("MANUAL", title_x, title_y + 15); 
   _spr.unloadFont();
 
@@ -1805,17 +1799,22 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     bool system_engaged = state.auto_running_background || state.manual_preset_running;
     bool is_in_use = is_active && system_engaged;
 
-    uint16_t bg_color = (is_active || is_in_use) ? TFT_WHITE : C_CARD_OFF;
-    uint16_t border_col = C_CARD_OFF; 
+    // สีพื้นกล่อง: active = ขาว, ไม่ active = #f2ffee (เขียวอ่อน)
+    uint16_t bg_color = (is_active || is_in_use) ? TFT_WHITE : C_CARD_HIGHLIGHT;
+    uint16_t border_col = color565(0xD0, 0xE8, 0xD0);  // เขียวอ่อนสำหรับ default border
 
-    if (is_editing_this) border_col = _blink_state ? TFT_RED : TFT_DARKGREY;
-    else if (is_selected) border_col = TFT_RED;        
-    else if (is_active || is_in_use) border_col = 0x24C0;         
+    // Cursor/selection border ใช้ #09904B แทน TFT_RED
+    if (is_editing_this) border_col = _blink_state ? C_MANUAL_GREEN : TFT_DARKGREY;
+    else if (is_selected) border_col = C_MANUAL_GREEN;        
+    else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;         
     
     _spr.fillRoundRect(x + 2, card_y + 2, card_w, card_h, 5, 0xBDF7); 
     _spr.fillRoundRect(x, card_y, card_w, card_h, 5, bg_color);
     _spr.drawRoundRect(x, card_y, card_w, card_h, 5, border_col);
-    if (is_selected) _spr.drawRoundRect(x+1, card_y+1, card_w-2, card_h-2, 5, border_col);
+    if (is_selected) {
+      _spr.drawRoundRect(x+1, card_y+1, card_w-2, card_h-2, 5, border_col);
+      _spr.drawRoundRect(x+2, card_y+2, card_w-4, card_h-4, 4, border_col);
+    }
 
     int cx = x + (card_w / 2);
     char val_buf[32];
@@ -1835,27 +1834,66 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     }
 
     // 1. วัดความกว้างตัวเลข (Font ใหญ่)
-    _spr.loadFont(Arial18);
+    _spr.loadFont(Arial30);
     int val_width = _spr.textWidth(val_buf);
-    _spr.loadFont(Arial18);// do not change
+    _spr.loadFont(Arial30);// do not change
     int unit_width = _spr.textWidth(unit_str);
 
     // 2. คำนวณความกว้างรวม (ตัวเลข + ช่องว่างเล็กน้อย + หน่วย) เพื่อหาจุดเริ่มวาดให้กึ่งกลางกล่องพอดี
     int total_block_width = val_width + 4 + unit_width;
     int start_x = cx - (total_block_width / 2);
 
-    // 3. วาดตัวเลข (Font ใหญ่)
-    _spr.loadFont(Arial18);
-    _spr.setTextDatum(TL_DATUM); // เปลี่ยนเป็นชิดซ้ายเพื่อวาดต่อกันได้
-    if (!is_active && !is_in_use) _spr.setTextColor(TFT_DARKGREY, bg_color);
-    else if (state.tc_faults[i]) _spr.setTextColor(TFT_RED, bg_color);
-    else if (state.heater_cutoff_state[i]) _spr.setTextColor(TFT_ORANGE, bg_color);
-    else _spr.setTextColor(0xFD20, bg_color);
+    // 3. วาดตัวเลข - ไล่สีตามอุณหภูมิอิงจาก max_temp ของ heater นั้นๆ
+    //    เขียว(เย็น) -> เหลือง(กลาง) -> ส้ม -> แดง(ร้อนเกิน max)
+    _spr.loadFont(Arial30);
+    _spr.setTextDatum(TL_DATUM);
+    
+    uint16_t temp_color;
+    if (!is_active && !is_in_use) {
+      temp_color = TFT_DARKGREY;
+    } else if (state.tc_faults[i]) {
+      temp_color = TFT_RED;
+    } else if (state.heater_cutoff_state[i]) {
+      temp_color = TFT_RED;
+    } else if (isnan(state.tc_temps[i])) {
+      temp_color = TFT_DARKGREY;
+    } else {
+      // ไล่สีอิงจาก max temp: 0% = เขียว, 50% = เหลือง, 80% = ส้ม, 100%+ = แดง
+      float max_t = config.max_temps[i];
+      float cur_t = state.tc_temps[i];
+      float ratio = (max_t > 0) ? (cur_t / max_t) : 0;
+      if (ratio < 0) ratio = 0;
+      
+      uint8_t tr, tg, tb;
+      if (ratio <= 0.5f) {
+        // เขียว -> เหลือง (0% -> 50%)
+        float f = ratio / 0.5f;
+        tr = (uint8_t)(0x09 + f * (0xE0 - 0x09));  // 0x09 -> 0xE0
+        tg = (uint8_t)(0x90 + f * (0xC0 - 0x90));  // 0x90 -> 0xC0
+        tb = (uint8_t)(0x00);
+      } else if (ratio <= 0.85f) {
+        // เหลือง -> ส้ม (50% -> 85%)
+        float f = (ratio - 0.5f) / 0.35f;
+        tr = (uint8_t)(0xE0 + f * (0xFF - 0xE0));  // 0xE0 -> 0xFF
+        tg = (uint8_t)(0xC0 - f * (0xC0 - 0x80));  // 0xC0 -> 0x80
+        tb = 0x00;
+      } else {
+        // ส้ม -> แดง (85% -> 100%+)
+        float f = (ratio - 0.85f) / 0.15f;
+        if (f > 1.0f) f = 1.0f;
+        tr = 0xFF;
+        tg = (uint8_t)(0x80 - f * 0x80);  // 0x80 -> 0x00
+        tb = 0x00;
+      }
+      temp_color = color565(tr, tg, tb);
+    }
+    
+    _spr.setTextColor(temp_color, bg_color);
     _spr.drawString(val_buf, start_x, card_y + 35);
 
-    // 4. วาดหน่วย (Font ใหญ่) ต่อท้ายตัวเลขทันที
-    _spr.loadFont(Arial18); // do not change
-    _spr.setTextColor(TFT_ORANGE, bg_color); 
+    // 4. วาดหน่วย (Font ใหญ่) ต่อท้ายตัวเลขทันที - ใช้สีเดียวกับตัวเลข
+    _spr.loadFont(Arial30); // do not change
+    _spr.setTextColor(temp_color, bg_color); 
     _spr.drawString(unit_str, start_x + val_width + 2, card_y + 35); 
     // --- [จบส่วนแก้ไข Dynamic Alignment] ---
 
@@ -1866,7 +1904,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     uint16_t edit_color = TFT_BLACK;
 
     if (is_editing_this) {
-        edit_color = TFT_RED; 
+        edit_color = C_MANUAL_GREEN; // ใช้สีเขียวแทน TFT_RED ตอน edit
         if (_quick_edit_step == Q_EDIT_TARGET) { label_txt = "SET >"; val_to_show = config.target_temps[i]; }
         else { label_txt = "MAX >"; val_to_show = config.max_temps[i]; }
     }
@@ -1885,7 +1923,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
     else if (state.tc_faults[i]) { status_txt = "FAULT"; status_col = TFT_RED; }
     else if (state.heater_cutoff_state[i]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
-    else if (is_in_use) { status_txt = "IN-USE"; status_col = 0x7BEF; }
+    else if (is_in_use) { status_txt = "IN-USE"; status_col = 0x07E0; }  // เขียวสำหรับ IN-USE
     else if (state.is_heating_active) { 
         if (state.heater_ready[i]) { status_txt = "READY"; status_col = 0x07E0; }
         else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
@@ -1928,25 +1966,45 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
 void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& config) {
   drawTaskBar();
   int top_y = 24;
-  #define C_BG_LIGHT 0xE7F9 
-  _spr.fillRect(0, top_y, _spr.width(), _spr.height() - top_y, C_BG_LIGHT);
+  int screen_h = _spr.height() - top_y;
+  int screen_w = _spr.width();
 
-  // เตรียมหน่วยอุณหภูมิ (C หรือ F ตัวใหญ่) 
+  // --- สีใหม่สำหรับ Auto Mode ---
+  uint16_t C_AUTO_CYAN    = color565(0x00, 0xB3, 0xB9);  // #00B3B9
+  uint16_t C_CARD_ACTIVE  = color565(0xEC, 0xFD, 0xFD);  // #ecfdfd
+  // gradient bottom: #9C99CA
+  
+  // --- Background gradient: white (top) -> #9C99CA (bottom) ---
+  for (int row = 0; row < screen_h; row++) {
+    float t = (float)row / (float)(screen_h - 1);
+    uint8_t r = 255 - (uint8_t)(t * (255 - 0x9C));
+    uint8_t g = 255 - (uint8_t)(t * (255 - 0x99));
+    uint8_t b = 255 - (uint8_t)(t * (255 - 0xCA));
+    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
+  }
+
+  // เตรียมหน่วยอุณหภูมิ
   char unit_char = (state.temp_unit == 'c' || state.temp_unit == 'C') ? 'C' : 'F';
 
   // --- 1. Header Section ---
   int title_y = top_y + 5;
+  float t_title = (float)(title_y - top_y) / (float)(screen_h - 1);
+  uint8_t bg_r = 255 - (uint8_t)(t_title * (255 - 0x9C));
+  uint8_t bg_g = 255 - (uint8_t)(t_title * (255 - 0x99));
+  uint8_t bg_b = 255 - (uint8_t)(t_title * (255 - 0xCA));
+  uint16_t title_bg = color565(bg_r, bg_g, bg_b);
+
   _spr.loadFont(Arial12);
-  _spr.setTextColor(0x2500, C_BG_LIGHT); 
+  _spr.setTextColor(C_AUTO_CYAN, title_bg); 
   _spr.setTextDatum(TL_DATUM);
   _spr.drawString("MODE", 10, title_y);
   _spr.loadFont(Arial18);
-  _spr.setTextColor(TFT_RED, C_BG_LIGHT);
+  _spr.setTextColor(C_AUTO_CYAN, title_bg);  // #00B3B9 สำหรับคำว่า AUTO
   _spr.drawString("AUTO RUN", 10, title_y + 12);
 
-  // Obj Temp - แก้ไขจาก "C" เป็น unit_char 
+  // Obj Temp
   _spr.loadFont(Arial12);
-  _spr.setTextColor(TFT_BLACK, C_BG_LIGHT);
+  _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.setTextDatum(TR_DATUM);
   _spr.drawString("OBJ TEMP", _spr.width() - 10, title_y + 2);
   _spr.loadFont(Arial18);
@@ -1973,12 +2031,21 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     bool is_selected = (_auto_selection == i && _show_cursor);
     bool is_editing = (_current_screen == SCREEN_QUICK_EDIT_AUTO && is_selected);
     
-    uint16_t bg = (is_active_step && globalRun) ? 0xDEFB : TFT_WHITE; 
-    uint16_t border = is_selected ? TFT_RED : (is_active_step ? 0x24C0 : 0xCCCCCC);
+    // สีพื้นกล่อง: active/heating = #ecfdfd, ไม่ active = ขาว
+    uint16_t bg = (is_active_step && globalRun) ? C_CARD_ACTIVE : TFT_WHITE;
+    uint16_t border = color565(0xD0, 0xE0, 0xE0);  // default border อ่อน
+
+    // Cursor/selection border ใช้ #00B3B9
+    if (is_editing) border = _blink_state ? C_AUTO_CYAN : TFT_DARKGREY;
+    else if (is_selected) border = C_AUTO_CYAN;
+    else if (is_active_step && globalRun) border = C_AUTO_CYAN;
 
     _spr.fillRoundRect(x, card_y, card_w, card_h, 5, bg);
     _spr.drawRoundRect(x, card_y, card_w, card_h, 5, border);
-    if(is_selected) _spr.drawRoundRect(x+1, card_y+1, card_w-2, card_h-2, 5, border);
+    if (is_selected) {
+      _spr.drawRoundRect(x+1, card_y+1, card_w-2, card_h-2, 5, border);
+      _spr.drawRoundRect(x+2, card_y+2, card_w-4, card_h-4, 4, border);
+    }
 
     int cx = x + (card_w / 2);
     _spr.loadFont(Arial12);
@@ -1989,22 +2056,55 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     
     const char* label_txt = "SET";
     float val_to_show = config.auto_target_temps[i];
-    uint16_t val_color = 0xFD20; 
 
     if (is_editing) {
-       val_color = TFT_RED; 
        if (_quick_edit_step == Q_EDIT_MAX) {
           label_txt = "MAX";
           val_to_show = config.auto_max_temps[i];
        }
     }
     
+    // "SET" / "MAX" label — ใช้ built-in font เล็กลง 1 step
+    _spr.unloadFont();
+    _spr.setTextSize(1);
     _spr.setTextColor(TFT_BLACK, bg);
+    _spr.setTextDatum(TC_DATUM);
     _spr.drawString(label_txt, cx, card_y + 30);
 
-    // Value - แก้ไขจาก "C" เป็น unit_char 
-    _spr.loadFont(Arial18);
+    // --- ไล่สีอุณหภูมิอิงจาก auto_max_temps ---
+    uint16_t val_color;
+    if (is_editing) {
+      val_color = C_AUTO_CYAN;  // สี cyan ตอน edit
+    } else {
+      float max_t = config.auto_max_temps[i];
+      float cur_set = config.auto_target_temps[i];
+      float ratio = (max_t > 0) ? (cur_set / max_t) : 0;
+      if (ratio < 0) ratio = 0;
+      
+      uint8_t tr, tg, tb;
+      if (ratio <= 0.5f) {
+        float f = ratio / 0.5f;
+        tr = (uint8_t)(0x00 + f * (0xE0 - 0x00));
+        tg = (uint8_t)(0xB3 + f * (0xC0 - 0xB3));
+        tb = (uint8_t)(0xB9 - f * (0xB9 - 0x00));
+      } else if (ratio <= 0.85f) {
+        float f = (ratio - 0.5f) / 0.35f;
+        tr = (uint8_t)(0xE0 + f * (0xFF - 0xE0));
+        tg = (uint8_t)(0xC0 - f * (0xC0 - 0x80));
+        tb = 0x00;
+      } else {
+        float f = (ratio - 0.85f) / 0.15f;
+        if (f > 1.0f) f = 1.0f;
+        tr = 0xFF;
+        tg = (uint8_t)(0x80 - f * 0x80);
+        tb = 0x00;
+      }
+      val_color = color565(tr, tg, tb);
+    }
+
+    _spr.loadFont(Arial30);
     _spr.setTextColor(val_color, bg);
+    _spr.setTextDatum(TC_DATUM);
     snprintf(buf, 20, "%.0f %c", convertTemp(val_to_show, state.temp_unit), unit_char);
     _spr.drawString(buf, cx, card_y + 48);
     _spr.unloadFont();
@@ -2031,7 +2131,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.unloadFont();
   }
 
-  // --- 3. Bottom Sensors Row - แก้ไขจาก "C" เป็น unit_char  ---
+  // --- 3. Bottom Sensors Row ---
   int btm_y = card_y + card_h + 8;
   int btm_w = _spr.width() - 12;
   int btm_h = _spr.height() - btm_y - 4; 
@@ -2058,35 +2158,54 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
 void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& config) {
   drawTaskBar();
   int top_y = 24;
-  #define C_BG_LIGHT 0xE7F9 
-  #define C_CARD_OFF 0xE71C
-  
-  _spr.fillRect(0, top_y, _spr.width(), _spr.height() - top_y, C_BG_LIGHT);
+  int screen_h = _spr.height() - top_y;
+  int screen_w = _spr.width();
+
+  // --- สีใหม่สำหรับ Preset Mode ---
+  uint16_t C_PRESET_OLIVE  = color565(0x91, 0x91, 0x0F);  // #91910f
+  uint16_t C_CARD_ACTIVE   = color565(0xEC, 0xFD, 0xFD);  // #ecfdfd
+  // gradient bottom: #CDCD06
+
+  // --- Background gradient: white (top) -> #CDCD06 (bottom) ---
+  for (int row = 0; row < screen_h; row++) {
+    float t = (float)row / (float)(screen_h - 1);
+    uint8_t r = 255 - (uint8_t)(t * (255 - 0xCD));
+    uint8_t g = 255 - (uint8_t)(t * (255 - 0xCD));
+    uint8_t b = 255 - (uint8_t)(t * (255 - 0x06));
+    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
+  }
+
   char unit_char = (state.temp_unit == 'c' || state.temp_unit == 'C') ? 'C' : 'F';
 
   // --- 1. Header Section ---
   int title_y = top_y + 5;
+  float t_title = (float)(title_y - top_y) / (float)(screen_h - 1);
+  uint8_t bg_r = 255 - (uint8_t)(t_title * (255 - 0xCD));
+  uint8_t bg_g = 255 - (uint8_t)(t_title * (255 - 0xCD));
+  uint8_t bg_b = 255 - (uint8_t)(t_title * (255 - 0x06));
+  uint16_t title_bg = color565(bg_r, bg_g, bg_b);
+
   _spr.loadFont(Arial12);
-  _spr.setTextColor(0x2500, C_BG_LIGHT);
+  _spr.setTextColor(C_PRESET_OLIVE, title_bg);
   _spr.setTextDatum(TL_DATUM);
   _spr.drawString("MODE", 10, title_y);
   _spr.loadFont(Arial18);
-  _spr.setTextColor(0x24C0, C_BG_LIGHT); // Green/Teal
-  _spr.drawString("PRESETS", 10, title_y + 15);
+  _spr.setTextColor(C_PRESET_OLIVE, title_bg);  // #91910f
+  _spr.drawString("PRESET", 10, title_y + 15);
   _spr.unloadFont();
 
   // Heater Temp (Right Side)
   _spr.loadFont(Arial12);
-  _spr.setTextColor(TFT_BLACK, C_BG_LIGHT);
+  _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.setTextDatum(TR_DATUM);
-  _spr.drawString("HEATER 1", _spr.width() - 10, title_y + 2);
+  _spr.drawString("OBJ TEMP", _spr.width() - 10, title_y + 2);
   
   _spr.loadFont(Arial18);
   char buf[40];
-  if (isnan(state.tc_temps[0])) snprintf(buf, 40, "--- %c", unit_char);
-  else snprintf(buf, 40, "%.0f %c", convertTemp(state.tc_temps[0], state.temp_unit), unit_char);
+  if (isnan(state.ir_temps[0])) snprintf(buf, 40, "--- %c", unit_char);
+  else snprintf(buf, 40, "%.0f %c", convertTemp(state.ir_temps[0], state.temp_unit), unit_char);
   
-  _spr.setTextColor(TFT_BLACK, C_BG_LIGHT);
+  _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.drawString(buf, _spr.width() - 10, title_y + 18);
   _spr.unloadFont();
 
@@ -2108,36 +2227,75 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_MANUAL && isCursor);
     bool isThisPresetActive = (state.manual_preset_index == i && state.manual_preset_running);
 
-    // Theme Colors
-    uint16_t bg = isConfirmed ? 0xDEFB : TFT_WHITE;
-    if (isOtherModeRunning) bg = C_CARD_OFF;
+    // สีพื้นกล่อง: active/confirmed = #ecfdfd, อื่นๆ = ขาว
+    uint16_t bg = (isConfirmed || isThisPresetActive) ? C_CARD_ACTIVE : TFT_WHITE;
+    if (isOtherModeRunning) bg = color565(0xE7, 0xE7, 0xE0);  // เทาอ่อนอมเหลือง
 
-    uint16_t border = 0xCCCCCC;
-    if (isCursor) border = TFT_RED;
-    else if (isConfirmed) border = 0x24C0;
+    uint16_t border = color565(0xD0, 0xD8, 0xD0);  // default border
+    if (isCursor) border = C_PRESET_OLIVE;           // #91910f
+    else if (isConfirmed) border = C_PRESET_OLIVE;
 
     _spr.fillRoundRect(x + 2, y + 2, card_w, card_h, 5, 0xBDF7);
     _spr.fillRoundRect(x, y, card_w, card_h, 5, bg);
     _spr.drawRoundRect(x, y, card_w, card_h, 5, border);
-    if(isCursor) _spr.drawRoundRect(x+1, y+1, card_w-2, card_h-2, 5, border);
+    if (isCursor) {
+      _spr.drawRoundRect(x+1, y+1, card_w-2, card_h-2, 5, border);
+      _spr.drawRoundRect(x+2, y+2, card_w-4, card_h-4, 4, border);
+    }
 
     _spr.loadFont(Arial18); _spr.setTextColor(TFT_BLACK, bg); _spr.setTextDatum(ML_DATUM);
     snprintf(buf, 10, "P%d", i + 1);
     _spr.drawString(buf, x + 8, y + (card_h/2) - 8);
     _spr.drawFastVLine(x + 35, y + 5, card_h - 10, 0xAAAAAA);
 
-    _spr.loadFont(Arial12); _spr.setTextDatum(TL_DATUM);
+    // "SET" / "MAX" label — ใช้ built-in font เล็กลง 1 step
     const char* label_txt = "SET";
     float val = (isEditingThis && _quick_edit_step == Q_EDIT_MAX) ? config.manual_max_temps[i] : config.manual_target_temps[i];
     if (isEditingThis && _quick_edit_step == Q_EDIT_MAX) label_txt = "MAX";
-    _spr.setTextColor(isEditingThis ? TFT_RED : TFT_DARKGREY, bg);
+
+    _spr.unloadFont();
+    _spr.setTextSize(1);
+    _spr.setTextDatum(TL_DATUM);
+    _spr.setTextColor(isEditingThis ? C_PRESET_OLIVE : TFT_DARKGREY, bg);
     _spr.drawString(label_txt, x + 42, y + 5);
 
-    _spr.loadFont(Arial18); _spr.setTextColor(isEditingThis ? TFT_RED : 0xFD20, bg);
+    // --- ไล่สีอุณหภูมิอิงจาก manual_max_temps ---
+    uint16_t val_color;
+    if (isEditingThis) {
+      val_color = C_PRESET_OLIVE;
+    } else {
+      float max_t = config.manual_max_temps[i];
+      float cur_set = config.manual_target_temps[i];
+      float ratio = (max_t > 0) ? (cur_set / max_t) : 0;
+      if (ratio < 0) ratio = 0;
+      
+      uint8_t tr, tg, tb;
+      if (ratio <= 0.5f) {
+        float f = ratio / 0.5f;
+        tr = (uint8_t)(0x09 + f * (0xE0 - 0x09));
+        tg = (uint8_t)(0x90 + f * (0xC0 - 0x90));
+        tb = 0x00;
+      } else if (ratio <= 0.85f) {
+        float f = (ratio - 0.5f) / 0.35f;
+        tr = (uint8_t)(0xE0 + f * (0xFF - 0xE0));
+        tg = (uint8_t)(0xC0 - f * (0xC0 - 0x80));
+        tb = 0x00;
+      } else {
+        float f = (ratio - 0.85f) / 0.15f;
+        if (f > 1.0f) f = 1.0f;
+        tr = 0xFF;
+        tg = (uint8_t)(0x80 - f * 0x80);
+        tb = 0x00;
+      }
+      val_color = color565(tr, tg, tb);
+    }
+
+    _spr.loadFont(Arial18); _spr.setTextColor(val_color, bg);
+    _spr.setTextDatum(TL_DATUM);
     snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
     _spr.drawString(buf, x + 42, y + 18);
 
-    // --- เพิ่ม: สถานะ (Dot + Text) ในแต่ละการ์ด ---
+    // --- สถานะ (Dot + Text) ---
     const char* p_status = "OFF"; uint16_t p_col = TFT_DARKGREY;
     if (state.tc_faults[0]) { p_status = "FAULT"; p_col = TFT_RED; }
     else if (isOtherModeRunning) { p_status = "IN-USE"; p_col = 0x7BEF; }
@@ -2147,12 +2305,19 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     } else if (isConfirmed) { p_status = "STANDBY"; p_col = TFT_BLUE; }
 
     _spr.loadFont(Arial12); _spr.fillCircle(x + 45, y + 42, 3, p_col);
-    _spr.setTextColor(p_col, bg); _spr.drawString(p_status, x + 53, y + 43);
+    _spr.setTextColor(p_col, bg); _spr.drawString(p_status, x + 53, y + 42);
     _spr.unloadFont();
   }
 
   // --- 3. Global Status Bar ---
   int status_y = grid_y + (2 * (card_h + gap)) + 6;
+  // คำนวณสี gradient ที่ตำแหน่ง status_y
+  float t_status = (float)(status_y - top_y) / (float)(screen_h - 1);
+  uint8_t sr = 255 - (uint8_t)(t_status * (255 - 0xCD));
+  uint8_t sg = 255 - (uint8_t)(t_status * (255 - 0xCD));
+  uint8_t sb = 255 - (uint8_t)(t_status * (255 - 0x06));
+  uint16_t status_bg = color565(sr, sg, sb);
+
   const char* status_text = "---";
   uint16_t status_color = TFT_DARKGREY;
   
@@ -2172,7 +2337,7 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   int txt_w = _spr.textWidth(status_text);
   int dot_x = (_spr.width() / 2) - (txt_w / 2) - 8;
   _spr.fillCircle(dot_x, status_y + 6, 4, status_color);
-  _spr.setTextColor(status_color, C_BG_LIGHT);
+  _spr.setTextColor(status_color, status_bg);
   _spr.setTextDatum(TC_DATUM);
   _spr.drawString(status_text, _spr.width()/2 + 5, status_y);
   _spr.unloadFont();
@@ -2199,7 +2364,7 @@ void UIManager::drawSettingsBrightness(const AppState& state) {
   int bar_w = 200, bar_h = 22, x = (_spr.width() - bar_w) / 2, y = 90;
   _spr.fillRoundRect(x, y, bar_w, bar_h, 4, C_SET_CARD_BG);
   _spr.drawRoundRect(x, y, bar_w, bar_h, 4, C_SET_CARD_BRD);
-  int fill_w = (int)((_temp_edit_value / 100.0f) * (bar_w - 4));
+  int fill_w = (int)((constrain(_temp_edit_value, 0.0f, 100.0f) / 100.0f) * (bar_w - 4));
   if (fill_w > 0) _spr.fillRoundRect(x + 2, y + 2, fill_w, bar_h - 4, 3, C_SET_ACCENT);
 
   char buf[30];
