@@ -370,19 +370,38 @@ void TaskMAX(void* pvParameters) {
               config.heater_active[i] = false;
 
               // 2. ถ้าเป็น Heater 1 (Main) ให้สั่งหยุด Auto และ Preset ทันที
+              //    แต่ไม่หยุด Manual/Standby เพราะ Heater 2/3 อาจยังใช้งานได้
               if (i == 0) {
                 sysState.auto_was_started = false;       // ปิด Auto Mode
                 sysState.manual_preset_running = false;  // ปิด Manual Preset
                 sysState.auto_step = 0;
 
-                // 3. ถ้าเครื่องกำลังรันอยู่ ให้ Force Stop และร้องเตือน
-                if (has_go_to) {
-                  has_go_to = false;                    // สั่ง Stop
-                  sysState.manual_was_started = false;  // ปิด Manual (Standby run)
-
-                  // สั่งร้องเตือน (Alarm)
+                // ถ้ากำลังรัน Auto หรือ Preset อยู่ → Force Stop + Alarm
+                // แต่ถ้ารัน Manual (Standby) ที่ใช้ Heater อื่น → ไม่ต้องหยุด
+                bool was_auto_or_preset = sysState.auto_was_started || sysState.manual_preset_running;
+                if (has_go_to && was_auto_or_preset) {
+                  has_go_to = false;
+                  sysState.manual_was_started = false;
                   beep_mode = 3;
                   beep_queue = 10;
+                }
+                // ถ้ารัน Manual (Standby) → เช็คว่ายังมี Heater อื่นที่ active อยู่ไหม
+                else if (has_go_to && sysState.manual_was_started) {
+                  bool any_other_active = false;
+                  for (int h = 1; h < 3; h++) {
+                    if (config.heater_active[h] && sysState.tc_faults[h] == 0) {
+                      any_other_active = true;
+                      break;
+                    }
+                  }
+                  if (!any_other_active) {
+                    // ไม่มี Heater อื่นเหลือ → หยุดทั้งหมด
+                    has_go_to = false;
+                    sysState.manual_was_started = false;
+                    beep_mode = 3;
+                    beep_queue = 10;
+                  }
+                  // มี Heater อื่นยังทำงาน → ปล่อยให้รันต่อ ไม่ต้อง alarm
                 }
               }
             }
@@ -530,17 +549,43 @@ void TaskHeater1Control(void* pvParameters) {
         is_active = false;
       }
     }
+    // ถ้า Heater 1 active แต่ sensor NaN → ปิด Auto/Preset ทันที
+    // สำหรับ Manual mode เช็คว่ามี Heater อื่นเหลือไหม
     if (has_go_to && is_active && isnan(current_t)) {
-      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-        has_go_to = false;
-        sysState.manual_was_started = false;
-        sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
-        sysState.auto_step = 0;
-        xSemaphoreGive(dataMutex);
+      config.heater_active[HEATER_IDX] = false;
+      is_active = false;
+      
+      if (is_auto_controlled) {
+        // Auto/Preset ต้องใช้ H1 → หยุดทันที
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          has_go_to = false;
+          sysState.manual_was_started = false;
+          sysState.auto_was_started = false;
+          sysState.manual_preset_running = false;
+          sysState.auto_step = 0;
+          xSemaphoreGive(dataMutex);
+        }
+        beep_mode = 3;
+        beep_queue = 10;
+      } else {
+        // Manual/Standby → เช็คว่ามี Heater อื่นเหลือไหม
+        bool any_other = false;
+        for (int h = 1; h < 3; h++) {
+          if (config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
+        }
+        if (!any_other) {
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            has_go_to = false;
+            sysState.manual_was_started = false;
+            sysState.auto_was_started = false;
+            sysState.manual_preset_running = false;
+            sysState.auto_step = 0;
+            xSemaphoreGive(dataMutex);
+          }
+          beep_mode = 3;
+          beep_queue = 10;
+        }
       }
-      beep_mode = 3;
-      beep_queue = 10;
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -746,16 +791,26 @@ void TaskHeater2Control(void* pvParameters) {
     } else if (!local_manual_started) {
       is_active = false;
     }
+    // ถ้า Heater นี้ active แต่ sensor NaN → ปิดแค่ตัวนี้
     if (has_go_to && is_active && isnan(current_t)) {
-      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-        has_go_to = false;
-        sysState.manual_was_started = false;
-        sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
-        xSemaphoreGive(dataMutex);
+      config.heater_active[HEATER_IDX] = false;
+      is_active = false;
+      // เช็คว่ายังมี Heater อื่นที่ active อยู่ไหม
+      bool any_other = false;
+      for (int h = 0; h < 3; h++) {
+        if (h != HEATER_IDX && config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
       }
-      beep_mode = 3;
-      beep_queue = 10;
+      if (!any_other) {
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          has_go_to = false;
+          sysState.manual_was_started = false;
+          sysState.auto_was_started = false;
+          sysState.manual_preset_running = false;
+          xSemaphoreGive(dataMutex);
+        }
+        beep_mode = 3;
+        beep_queue = 10;
+      }
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -880,16 +935,25 @@ void TaskHeater3Control(void* pvParameters) {
     } else if (!local_manual_started) {
       is_active = false;
     }
+    // ถ้า Heater นี้ active แต่ sensor NaN → ปิดแค่ตัวนี้
     if (has_go_to && is_active && isnan(current_t)) {
-      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-        has_go_to = false;
-        sysState.manual_was_started = false;
-        sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
-        xSemaphoreGive(dataMutex);
+      config.heater_active[HEATER_IDX] = false;
+      is_active = false;
+      bool any_other = false;
+      for (int h = 0; h < 3; h++) {
+        if (h != HEATER_IDX && config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
       }
-      beep_mode = 3;
-      beep_queue = 10;
+      if (!any_other) {
+        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+          has_go_to = false;
+          sysState.manual_was_started = false;
+          sysState.auto_was_started = false;
+          sysState.manual_preset_running = false;
+          xSemaphoreGive(dataMutex);
+        }
+        beep_mode = 3;
+        beep_queue = 10;
+      }
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -1084,21 +1148,39 @@ void TaskInput(void* pvParameters) {
                     h1_fault = (sysState.tc_faults[0] != 0);
                     xSemaphoreGive(dataMutex);
                 }
-                if (h1_fault) {
-                  beep_mode = 3;  // เสียง Alarm สั้นๆ หรือแบบเตือน
-                  beep_queue = 2;
-                } else {
-                  // --- CASE: START ---
-                  if (current == SCREEN_STANDBY) {
+
+                // --- CASE: START ---
+                if (current == SCREEN_STANDBY) {
+                  // Manual/Standby ใช้ Heater ตัวไหนก็ได้ → เช็คว่ามี heater active อย่างน้อย 1 ตัว
+                  bool any_heater_ok = false;
+                  for (int h = 0; h < 3; h++) {
+                    if (config.heater_active[h] && sysState.tc_faults[h] == 0) { any_heater_ok = true; break; }
+                  }
+                  if (any_heater_ok) {
                     sysState.manual_was_started = true;
                     has_go_to = true;
+                  } else {
+                    beep_mode = 3;
+                    beep_queue = 2;
+                  }
 
-                  } else if (current == SCREEN_AUTO_MODE) {
+                } else if (current == SCREEN_AUTO_MODE) {
+                  // Auto ต้องใช้ Heater 1 เท่านั้น
+                  if (h1_fault) {
+                    beep_mode = 3;
+                    beep_queue = 2;
+                  } else {
                     sysState.auto_was_started = true;
                     sysState.auto_step = 1;
                     has_go_to = true;
+                  }
 
-                  } else if (current == SCREEN_MANUAL_MODE) {
+                } else if (current == SCREEN_MANUAL_MODE) {
+                  // Preset ต้องใช้ Heater 1 เท่านั้น
+                  if (h1_fault) {
+                    beep_mode = 3;
+                    beep_queue = 2;
+                  } else {
                     sysState.manual_preset_running = true;
                     sysState.manual_preset_index = ui.getManualConfirmedPreset();
                     has_go_to = true;
@@ -1180,7 +1262,8 @@ void TaskDisplay(void* pvParameters) {
 
       for (int i = 0; i < 3; i++) {
         st.tc_temps[i] = sysState.displayed_temps[i];
-        if (isnan(st.tc_temps[i])) all_sensors_ok = false;
+        // เช็ค all_sensors_ok เฉพาะ heater ที่ active เท่านั้น
+        if (config.heater_active[i] && isnan(st.tc_temps[i])) all_sensors_ok = false;
         st.tc_faults[i] = sysState.tc_faults[i];
         st.heater_cutoff_state[i] = sysState.heater_cutoff[i];
         if (st.heater_cutoff_state[i]) {
