@@ -541,7 +541,9 @@ void UIManager::drawSettingsWiFiMenu(const AppState& state, const ConfigState& c
         _spr.drawString(buf, X_MARGIN + 10, y + ITEM_HEIGHT / 2);
         break;
       case WIFI_MENU_PASSWORD:
-        snprintf(buf, 50, "Pass: %s", (strlen(config.wifi_config.password) > 0) ? "****" : "(none)");
+        snprintf(buf, 50, "Pass: %.16s%s", 
+          (strlen(config.wifi_config.password) > 0) ? config.wifi_config.password : "(none)",
+          (strlen(config.wifi_config.password) > 16) ? ".." : "");
         _spr.drawString(buf, X_MARGIN + 10, y + ITEM_HEIGHT / 2);
         break;
       default:
@@ -718,7 +720,7 @@ void UIManager::drawSettingsWiFiSSID(const AppState& state, const ConfigState& c
 }
 
 void UIManager::drawSettingsWiFiPassword(const AppState& state, const ConfigState& config) {
-  drawCharEntryScreen("Edit Password", true);
+  drawCharEntryScreen("Edit Password", false);
 }
 
 void UIManager::drawSettingsWiFiStatus(const AppState& state, const ConfigState& config) {
@@ -890,8 +892,12 @@ void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState&
     _spr.setTextDatum(MC_DATUM);
     char buf[40];
     if (i == 0) {
-      float disp_val = convertTemp(state.ir_temps[0], state.temp_unit);
-      snprintf(buf, 40, isnan(state.ir_temps[0]) ? "IR1 (---): %.2f" : "IR1 (%.1f%c): %.2f", disp_val, isnan(state.ir_temps[0]) ? ' ' : state.temp_unit, config.ir_emissivity[0]);
+      if (!isnan(state.ir_temps[0])) {
+        float disp_val = convertTemp(state.ir_temps[0], state.temp_unit);
+        snprintf(buf, 40, "IR1 (%.1f%c): %.2f", disp_val, state.temp_unit, config.ir_emissivity[0]);
+      } else {
+        snprintf(buf, 40, "IR1: Not Connected");
+      }
     } else {
       float disp_val = convertTemp(state.ir_temps[1], state.temp_unit);
       if (!isnan(state.ir_temps[1])) snprintf(buf, 40, "IR2 (%.1f%c): %.2f", disp_val, state.temp_unit, config.ir_emissivity[1]);
@@ -1676,7 +1682,7 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       {
         float* target = &config.ir_emissivity[_selected_menu_item];
         *target += (float)change * 0.01f;
-        if (*target < 0.1f) *target = 0.1f;
+        if (*target < 0.01f) *target = 0.01f;
         if (*target > 1.0f) *target = 1.0f;
         break;
       }
@@ -2302,6 +2308,8 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     else if (isThisPresetActive && globalRun) {
         if (state.heater_ready[0]) { p_status = "READY"; p_col = 0x07E0; }
         else { p_status = "HEATING"; p_col = TFT_ORANGE; }
+    } else if (state.manual_preset_running && globalRun && !isThisPresetActive) {
+        p_status = "IN-USE"; p_col = 0x7BEF;
     } else if (isConfirmed) { p_status = "STANDBY"; p_col = TFT_BLUE; }
 
     _spr.loadFont(Arial12); _spr.fillCircle(x + 45, y + 42, 3, p_col);
