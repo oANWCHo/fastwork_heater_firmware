@@ -83,6 +83,29 @@ SemaphoreHandle_t spiMutex;
 SemaphoreHandle_t dataMutex;
 SemaphoreHandle_t serialMutex;
 
+// Fault Reason Codes
+enum FaultReason : uint8_t {
+  FAULT_NONE = 0,
+  FAULT_SPI_ZERO,        // SPI read 0x00000000 (no chip / wiring)
+  FAULT_SPI_FF,          // SPI read 0xFFFFFFFF (no chip / wiring)
+  FAULT_HW_BIT,          // MAX31855 fault bit (OC/SC/SCV) held >500ms
+  FAULT_STUCK,           // Raw data unchanged >2s
+  FAULT_NAN_ACTIVE,      // Heater active but sensor NaN (global stop trigger)
+};
+
+// Human-readable fault labels (keep in sync with enum)
+const char* faultReasonStr(uint8_t code) {
+  switch (code) {
+    case FAULT_NONE:        return "OK";
+    case FAULT_SPI_ZERO:    return "SPI read 0x0 – check wiring / chip";
+    case FAULT_SPI_FF:      return "SPI read 0xFF – check wiring / chip";
+    case FAULT_HW_BIT:      return "MAX31855 HW fault (OC/SC) >500ms";
+    case FAULT_STUCK:       return "Data stuck >2s – temp unchanged";
+    case FAULT_NAN_ACTIVE:  return "Sensor NaN while heater active – EMERGENCY STOP";
+    default:                return "Unknown";
+  }
+}
+
 // Thread-Safe Data Model
 struct SharedData {
   float tc_temps[3];
@@ -91,6 +114,7 @@ struct SharedData {
   float tc_probe_peak;
   float cj_temps[3];
   uint8_t tc_faults[3];
+  uint8_t tc_fault_reason[3];   // FaultReason code per channel
   float ir_temps[2];
   float ir_ambient[2];
   bool heater_cutoff[3];
@@ -286,6 +310,8 @@ void TaskMAX(void* pvParameters) {
   const uint32_t STUCK_THRESHOLD_MS = 2000;
   static uint32_t fault_start_time[4] = { 0, 0, 0, 0 };
   const uint32_t FAULT_HOLD_MS = 500;
+  const uint32_t STARTUP_GRACE_MS = 5000;  // ไม่เช็ค stuck detection ช่วง 5 วินาทีแรก
+  uint32_t task_start_time = millis();
 
   SPIClass* vspi = new SPIClass(VSPI);
   vspi->begin(MAXCLK, MAXDO, -1, -1);
@@ -311,15 +337,21 @@ void TaskMAX(void* pvParameters) {
 
         float raw_temp = NAN;
         bool is_fault = false;
+        uint8_t fault_reason = FAULT_NONE;
 
-        if (d == 0 || d == 0xFFFFFFFF) {
+        if (d == 0) {
           is_fault = true;
+          fault_reason = FAULT_SPI_ZERO;
+        } else if (d == 0xFFFFFFFF) {
+          is_fault = true;
+          fault_reason = FAULT_SPI_FF;
         } else if (d & 0x10000) {
           if (fault_start_time[i] == 0) {
             fault_start_time[i] = millis();
           }
           if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
             is_fault = true;
+            fault_reason = FAULT_HW_BIT;
           }
         } else {
           fault_start_time[i] = 0;
@@ -327,8 +359,10 @@ void TaskMAX(void* pvParameters) {
 
         if (!is_fault) {
           if (d == prev_raw_data[i]) {
-            if (millis() - last_change_time[i] > STUCK_THRESHOLD_MS) {
+            if ((millis() - task_start_time > STARTUP_GRACE_MS) && 
+                (millis() - last_change_time[i] > STUCK_THRESHOLD_MS)) {
               is_fault = true;
+              fault_reason = FAULT_STUCK;
             }
           } else {
             prev_raw_data[i] = d;
@@ -365,44 +399,26 @@ void TaskMAX(void* pvParameters) {
           if (i < 3) {
             sysState.tc_temps[i] = final_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
+            sysState.tc_fault_reason[i] = fault_reason;
             if (is_fault) {
-              // 1. สั่งปิด Heater ตัวที่เสีย (เอาติ๊กถูกออก)
-              config.heater_active[i] = false;
+              // [BUG1 FIX] Global stop เฉพาะเมื่อ heater ตัวที่ fault นั้น active อยู่
+              // ถ้า heater ตัวนั้น OFF อยู่แล้ว → ไม่ต้องทำอะไร (แค่ไม่ได้เสียบสาย)
+              if (config.heater_active[i] && has_go_to) {
+                config.heater_active[i] = false;  // ปิดตัวที่ fault
 
-              // 2. ถ้าเป็น Heater 1 (Main) ให้สั่งหยุด Auto และ Preset ทันที
-              //    แต่ไม่หยุด Manual/Standby เพราะ Heater 2/3 อาจยังใช้งานได้
-              if (i == 0) {
-                sysState.auto_was_started = false;       // ปิด Auto Mode
-                sysState.manual_preset_running = false;  // ปิด Manual Preset
+                // หยุดทั้งระบบทันที + ปิด heater ทุกตัว
+                has_go_to = false;
+                sysState.manual_was_started = false;
+                sysState.auto_was_started = false;
+                sysState.manual_preset_running = false;
                 sysState.auto_step = 0;
 
-                // ถ้ากำลังรัน Auto หรือ Preset อยู่ → Force Stop + Alarm
-                // แต่ถ้ารัน Manual (Standby) ที่ใช้ Heater อื่น → ไม่ต้องหยุด
-                bool was_auto_or_preset = sysState.auto_was_started || sysState.manual_preset_running;
-                if (has_go_to && was_auto_or_preset) {
-                  has_go_to = false;
-                  sysState.manual_was_started = false;
-                  beep_mode = 3;
-                  beep_queue = 10;
+                for (int h = 0; h < 3; h++) {
+                  config.heater_active[h] = false;
                 }
-                // ถ้ารัน Manual (Standby) → เช็คว่ายังมี Heater อื่นที่ active อยู่ไหม
-                else if (has_go_to && sysState.manual_was_started) {
-                  bool any_other_active = false;
-                  for (int h = 1; h < 3; h++) {
-                    if (config.heater_active[h] && sysState.tc_faults[h] == 0) {
-                      any_other_active = true;
-                      break;
-                    }
-                  }
-                  if (!any_other_active) {
-                    // ไม่มี Heater อื่นเหลือ → หยุดทั้งหมด
-                    has_go_to = false;
-                    sysState.manual_was_started = false;
-                    beep_mode = 3;
-                    beep_queue = 10;
-                  }
-                  // มี Heater อื่นยังทำงาน → ปล่อยให้รันต่อ ไม่ต้อง alarm
-                }
+
+                beep_mode = 3;
+                beep_queue = 10;
               }
             }
           } else {
@@ -508,7 +524,8 @@ void TaskHeater1Control(void* pvParameters) {
       }
     }
     if (millis() - wire_max_timer > 5000) {
-      float wire_max_display = wire_max_tracker;
+      // [BUG3 FIX] ถ้าไม่เคยมีค่า valid เลย (ยังเป็น -999) → แสดง NAN ("---")
+      float wire_max_display = (wire_max_tracker > -900.0f) ? wire_max_tracker : NAN;
       wire_max_tracker = -999.0f;
       wire_max_timer = millis();
       if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
@@ -549,43 +566,28 @@ void TaskHeater1Control(void* pvParameters) {
         is_active = false;
       }
     }
-    // ถ้า Heater 1 active แต่ sensor NaN → ปิด Auto/Preset ทันที
-    // สำหรับ Manual mode เช็คว่ามี Heater อื่นเหลือไหม
+    // [BUG1 FIX] ถ้า Heater 1 active แต่ sensor NaN → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
       
-      if (is_auto_controlled) {
-        // Auto/Preset ต้องใช้ H1 → หยุดทันที
-        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-          has_go_to = false;
-          sysState.manual_was_started = false;
-          sysState.auto_was_started = false;
-          sysState.manual_preset_running = false;
-          sysState.auto_step = 0;
-          xSemaphoreGive(dataMutex);
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
+          sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
-        beep_mode = 3;
-        beep_queue = 10;
-      } else {
-        // Manual/Standby → เช็คว่ามี Heater อื่นเหลือไหม
-        bool any_other = false;
-        for (int h = 1; h < 3; h++) {
-          if (config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        sysState.auto_step = 0;
+        // ปิด heater ทุกตัว
+        for (int h = 0; h < 3; h++) {
+          config.heater_active[h] = false;
         }
-        if (!any_other) {
-          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            has_go_to = false;
-            sysState.manual_was_started = false;
-            sysState.auto_was_started = false;
-            sysState.manual_preset_running = false;
-            sysState.auto_step = 0;
-            xSemaphoreGive(dataMutex);
-          }
-          beep_mode = 3;
-          beep_queue = 10;
-        }
+        xSemaphoreGive(dataMutex);
       }
+      beep_mode = 3;
+      beep_queue = 10;
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -791,26 +793,28 @@ void TaskHeater2Control(void* pvParameters) {
     } else if (!local_manual_started) {
       is_active = false;
     }
-    // ถ้า Heater นี้ active แต่ sensor NaN → ปิดแค่ตัวนี้
+    // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
-      // เช็คว่ายังมี Heater อื่นที่ active อยู่ไหม
-      bool any_other = false;
-      for (int h = 0; h < 3; h++) {
-        if (h != HEATER_IDX && config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
-      }
-      if (!any_other) {
-        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-          has_go_to = false;
-          sysState.manual_was_started = false;
-          sysState.auto_was_started = false;
-          sysState.manual_preset_running = false;
-          xSemaphoreGive(dataMutex);
+      
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
+          sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
-        beep_mode = 3;
-        beep_queue = 10;
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        sysState.auto_step = 0;
+        // ปิด heater ทุกตัว
+        for (int h = 0; h < 3; h++) {
+          config.heater_active[h] = false;
+        }
+        xSemaphoreGive(dataMutex);
       }
+      beep_mode = 3;
+      beep_queue = 10;
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -935,25 +939,28 @@ void TaskHeater3Control(void* pvParameters) {
     } else if (!local_manual_started) {
       is_active = false;
     }
-    // ถ้า Heater นี้ active แต่ sensor NaN → ปิดแค่ตัวนี้
+    // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
-      bool any_other = false;
-      for (int h = 0; h < 3; h++) {
-        if (h != HEATER_IDX && config.heater_active[h] && sysState.tc_faults[h] == 0) { any_other = true; break; }
-      }
-      if (!any_other) {
-        if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-          has_go_to = false;
-          sysState.manual_was_started = false;
-          sysState.auto_was_started = false;
-          sysState.manual_preset_running = false;
-          xSemaphoreGive(dataMutex);
+      
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+        if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
+          sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
-        beep_mode = 3;
-        beep_queue = 10;
+        has_go_to = false;
+        sysState.manual_was_started = false;
+        sysState.auto_was_started = false;
+        sysState.manual_preset_running = false;
+        sysState.auto_step = 0;
+        // ปิด heater ทุกตัว
+        for (int h = 0; h < 3; h++) {
+          config.heater_active[h] = false;
+        }
+        xSemaphoreGive(dataMutex);
       }
+      beep_mode = 3;
+      beep_queue = 10;
     }
     // === PID & OUTPUT LOGIC ===
     float output_percent = 0.0f;
@@ -1420,6 +1427,7 @@ void setup() {
     sysState.displayed_temps[i] = NAN;
     sysState.cj_temps[i] = NAN;
     sysState.tc_faults[i] = 0;
+    sysState.tc_fault_reason[i] = FAULT_NONE;
     sysState.heater_cutoff[i] = false;
     sysState.heater_ready[i] = false;
   }
@@ -1474,6 +1482,9 @@ void setup() {
     saveConfig(config);
   }
 
+  // [BUG2 FIX] Startup mode: ใช้ flag รอให้ sensor อ่านค่าได้ก่อนค่อยเริ่ม
+  // ไม่ set has_go_to ทันที เพราะ sensor ยังอ่านค่าไม่ได้ (NAN) จะ trigger fault
+  bool pending_autorun = false;
   if (config.startup_mode == STARTUP_OFF) {
     has_go_to = false;
   }
@@ -1483,9 +1494,8 @@ void setup() {
       if (config.heater_active[i]) any_active = true;
     }
     if (any_active) {
-      has_go_to = true;
-      sysState.manual_was_started = true;
-      Serial.println("Startup: Auto-Run Triggered");
+      pending_autorun = true;  // รอ sensor พร้อมก่อน
+      Serial.println("Startup: Auto-Run Pending (waiting for sensors)");
     }
   } else {
     has_go_to = false;
@@ -1537,6 +1547,35 @@ void setup() {
 
   tpo_ticker.attach_ms(1, tpo_isr);
   Serial.println("=== System Started Successfully ===");
+
+  // [BUG2 FIX] รอให้ sensor อ่านค่าได้ก่อนค่อยเริ่ม autorun
+  if (pending_autorun) {
+    Serial.println("Startup: Waiting 5s for sensors to stabilize...");
+    vTaskDelay(pdMS_TO_TICKS(5000));  // รอ 5 วินาทีให้ sensor อ่านค่าได้ (ต้องเกิน STARTUP_GRACE_MS)
+
+    // เช็คว่า sensor ที่ active อ่านค่าได้จริงไหม
+    bool sensors_ok = false;
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      for (int i = 0; i < 3; i++) {
+        if (config.heater_active[i] && !isnan(sysState.tc_temps[i]) && sysState.tc_faults[i] == 0) {
+          sensors_ok = true;
+          break;
+        }
+      }
+      if (sensors_ok) {
+        has_go_to = true;
+        sysState.manual_was_started = true;
+        Serial.println("Startup: Auto-Run Activated (sensors OK)");
+      } else {
+        Serial.println("Startup: Auto-Run CANCELLED (sensor fault)");
+        // ปิด heater ทั้งหมดเพราะ sensor ไม่พร้อม
+        for (int i = 0; i < 3; i++) {
+          config.heater_active[i] = false;
+        }
+      }
+      xSemaphoreGive(dataMutex);
+    }
+  }
 }
 
 void loop() {
@@ -1555,6 +1594,7 @@ void setupWebServer() {
     float displayed[3] = {0};
     float probe_temp = 0, probe_peak = 0;
     uint8_t faults[3] = {0};
+    uint8_t fault_reasons[3] = {0};
     bool cutoff[3] = {false}, ready[3] = {false};
     bool manual_started = false, auto_started = false, preset_running = false;
     uint8_t a_step = 0, preset_idx = 0;
@@ -1565,6 +1605,7 @@ void setupWebServer() {
         tcs[i] = sysState.tc_temps[i];
         displayed[i] = sysState.displayed_temps[i];
         faults[i] = sysState.tc_faults[i];
+        fault_reasons[i] = sysState.tc_fault_reason[i];
         cutoff[i] = sysState.heater_cutoff[i];
         ready[i] = sysState.heater_ready[i];
       }
@@ -1646,7 +1687,9 @@ void setupWebServer() {
       json += "\"power\":" + String(power[i], 1) + ",";
       json += "\"cutoff\":" + String(cutoff[i] ? "true" : "false") + ",";
       json += "\"ready\":" + String(ready[i] ? "true" : "false") + ",";
-      json += "\"fault\":" + String(faults[i]);
+      json += "\"fault\":" + String(faults[i]) + ",";
+      json += "\"fault_reason\":" + String(fault_reasons[i]) + ",";
+      json += "\"fault_text\":\"" + String(faultReasonStr(fault_reasons[i])) + "\"";
       json += "}";
       if (i < 2) json += ",";
     }
@@ -1658,7 +1701,7 @@ void setupWebServer() {
     for (int i = 0; i < 3; i++) {
       if (faults[i]) {
         if (!first_warn) json += ",";
-        json += "\"TC" + String(i+1) + " FAULT\"";
+        json += "\"TC" + String(i+1) + " FAULT: " + String(faultReasonStr(fault_reasons[i])) + "\"";
         first_warn = false;
       }
       if (cutoff[i]) {
@@ -1795,6 +1838,16 @@ void setupWebServer() {
     .info-value.ok { color: #2ecc71; }
     .info-value.warn { color: #f39c12; }
     .info-value.err { color: #e74c3c; }
+    .fault-reason-row { 
+      background: rgba(231,76,60,0.15); 
+      border-radius: 6px; 
+      padding: 6px 8px !important; 
+      margin-top: 4px;
+    }
+    .fault-reason-row .info-value { 
+      font-size: 0.85em; 
+      word-break: break-word;
+    }
     
     .warnings-panel {
       background: rgba(231,76,60,0.2);
@@ -1883,9 +1936,11 @@ void setupWebServer() {
           <span class="info-label">Status</span>
           <span class="info-value" id="status1">Inactive</span>
         </div>
+        <div class="info-row fault-reason-row" id="faultRow1" style="display:none">
+          <span class="info-label">Fault</span>
+          <span class="info-value err" id="faultText1">--</span>
+        </div>
       </div>
-      
-      <!-- Heater 2 -->
       <div class="card heater-card" id="heater2">
         <h3>Heater 2</h3>
         <div class="temp-display" id="temp2">-- °C</div>
@@ -1905,6 +1960,10 @@ void setupWebServer() {
         <div class="info-row">
           <span class="info-label">Status</span>
           <span class="info-value" id="status2">Inactive</span>
+        </div>
+        <div class="info-row fault-reason-row" id="faultRow2" style="display:none">
+          <span class="info-label">Fault</span>
+          <span class="info-value err" id="faultText2">--</span>
         </div>
       </div>
       
@@ -1928,6 +1987,10 @@ void setupWebServer() {
         <div class="info-row">
           <span class="info-label">Status</span>
           <span class="info-value" id="status3">Inactive</span>
+        </div>
+        <div class="info-row fault-reason-row" id="faultRow3" style="display:none">
+          <span class="info-label">Fault</span>
+          <span class="info-value err" id="faultText3">--</span>
         </div>
       </div>
       
@@ -2071,12 +2134,18 @@ void setupWebServer() {
         
         // Status text
         const statusEl = document.getElementById('status' + idx);
-        if (h.fault) { statusEl.textContent = 'FAULT'; statusEl.className = 'info-value err'; }
-        else if (h.cutoff) { statusEl.textContent = 'CUTOFF'; statusEl.className = 'info-value warn'; }
-        else if (h.ready) { statusEl.textContent = 'READY'; statusEl.className = 'info-value ok'; }
-        else if (h.active && h.power > 0) { statusEl.textContent = 'Heating'; statusEl.className = 'info-value warn'; }
-        else if (h.active) { statusEl.textContent = 'Active'; statusEl.className = 'info-value ok'; }
-        else { statusEl.textContent = 'Inactive'; statusEl.className = 'info-value'; }
+        const faultRowEl = document.getElementById('faultRow' + idx);
+        const faultTextEl = document.getElementById('faultText' + idx);
+        if (h.fault) { 
+          statusEl.textContent = 'FAULT'; statusEl.className = 'info-value err';
+          faultRowEl.style.display = 'flex';
+          faultTextEl.textContent = h.fault_text || 'Unknown';
+        }
+        else if (h.cutoff) { statusEl.textContent = 'CUTOFF'; statusEl.className = 'info-value warn'; faultRowEl.style.display = 'none'; }
+        else if (h.ready) { statusEl.textContent = 'READY'; statusEl.className = 'info-value ok'; faultRowEl.style.display = 'none'; }
+        else if (h.active && h.power > 0) { statusEl.textContent = 'Heating'; statusEl.className = 'info-value warn'; faultRowEl.style.display = 'none'; }
+        else if (h.active) { statusEl.textContent = 'Active'; statusEl.className = 'info-value ok'; faultRowEl.style.display = 'none'; }
+        else { statusEl.textContent = 'Inactive'; statusEl.className = 'info-value'; faultRowEl.style.display = 'none'; }
       });
       
       // IR sensors
@@ -2245,13 +2314,49 @@ void saveConfig(const ConfigState& cfg) {
 }
 
 void loadConfig(ConfigState& cfg) {
-  if (preferences.getBytesLength("config") == sizeof(cfg))
+  size_t stored_len = preferences.getBytesLength("config");
+  if (stored_len == sizeof(cfg)) {
     preferences.getBytes("config", &cfg, sizeof(cfg));
+  } else if (stored_len > 0) {
+    // Size mismatch (firmware update?) — load what we can, zero the rest
+    uint8_t temp_buf[512];
+    size_t read_len = min(stored_len, sizeof(temp_buf));
+    preferences.getBytes("config", temp_buf, read_len);
+    memset(&cfg, 0, sizeof(cfg));
+    memcpy(&cfg, temp_buf, min(read_len, sizeof(cfg)));
+    Serial.printf("[Config] Size mismatch: stored=%d, expected=%d. Partial load.\n", stored_len, sizeof(cfg));
+  }
 
-  if (cfg.wifi_config.ssid[0] == 0xFF) {
+  // Validate WiFi config — check for corrupted/uninitialized strings
+  bool wifi_corrupted = false;
+  if (cfg.wifi_config.ssid[0] == (char)0xFF || cfg.wifi_config.password[0] == (char)0xFF) {
+    wifi_corrupted = true;
+  }
+  // Check for non-printable characters in SSID/password (corruption indicator)
+  if (!wifi_corrupted) {
+    for (int i = 0; i < WIFI_SSID_MAX_LEN && cfg.wifi_config.ssid[i] != '\0'; i++) {
+      if (cfg.wifi_config.ssid[i] < 0x20 || cfg.wifi_config.ssid[i] > 0x7E) {
+        wifi_corrupted = true;
+        break;
+      }
+    }
+  }
+  if (!wifi_corrupted) {
+    for (int i = 0; i < WIFI_PASS_MAX_LEN && cfg.wifi_config.password[i] != '\0'; i++) {
+      if (cfg.wifi_config.password[i] < 0x20 || cfg.wifi_config.password[i] > 0x7E) {
+        wifi_corrupted = true;
+        break;
+      }
+    }
+  }
+  if (wifi_corrupted) {
+    Serial.println("[Config] WiFi config corrupted — resetting to defaults");
     memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
     cfg.wifi_config.use_custom = false;
   }
+  // Ensure null terminators
+  cfg.wifi_config.ssid[WIFI_SSID_MAX_LEN] = '\0';
+  cfg.wifi_config.password[WIFI_PASS_MAX_LEN] = '\0';
 
   if (cfg.brightness == 0 && cfg.wifi_config.use_custom == false) cfg.brightness = 100;
 }
