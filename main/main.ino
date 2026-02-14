@@ -61,6 +61,27 @@
 // 0 = Thermocouple, 1 = IR1
 #define AUTO_CONTROL_SENSOR 1
 
+// ========== [Auto Mode Cycle Detection Method] ==========
+// Define AUTO_USE_DIFFERENCE_MODE to use temperature-drop-based detection
+// instead of absolute threshold (< 40°C).
+// Useful for wide-FOV IR sensors (e.g. MLX90614ESF 90°) where ambient
+// reading stays above 40°C due to heater radiation in FOV.
+#define AUTO_USE_DIFFERENCE_MODE
+
+#ifdef AUTO_USE_DIFFERENCE_MODE
+  // Cycle transition: object removed when temp drops this much from peak
+  #define AUTO_DROP_THRESHOLD    30.0f   // °C drop from peak_temp to trigger next cycle
+  // Safety: if IR reads within this margin of ambient for too long, no object is present  
+  #define AUTO_NO_OBJECT_MARGIN  10.0f   // °C above ambient = "no object"
+  // Safety: time (ms) IR must stay near ambient before auto-stop (no object)
+  #define AUTO_NO_OBJECT_TIMEOUT 30000   // 30 seconds
+#else
+  // Legacy absolute threshold mode
+  #define AUTO_ABS_THRESHOLD     40.0f   // °C absolute threshold for cycle change
+  #define AUTO_ABS_SAFETY_TEMP   40.0f   // °C absolute threshold for no-object safety
+  #define AUTO_ABS_SAFETY_MS     30000   // 30 seconds
+#endif
+
 // ========== [WiFi Configuration] ==========
 const char* ssid = "NNTT24";
 const char* password = "TeraE-01";
@@ -93,6 +114,53 @@ enum FaultReason : uint8_t {
   FAULT_NAN_ACTIVE,      // Heater active but sensor NaN (global stop trigger)
 };
 
+// ========== [Fault Log System] ==========
+#define FAULT_LOG_MAX 30  // Ring buffer size
+
+struct FaultLogEntry {
+  uint32_t timestamp_ms;   // millis() when fault occurred
+  uint8_t  channel;        // 0-2 = TC1-TC3, 255 = system
+  uint8_t  fault_reason;   // FaultReason code
+  float    temp_at_fault;  // Temperature reading at time of fault (NAN if unavailable)
+  float    power_at_fault; // Heater power % at time of fault
+  char     mode[16];       // Mode string at time of fault
+};
+
+struct FaultLog {
+  FaultLogEntry entries[FAULT_LOG_MAX];
+  int head;       // Next write position
+  int count;      // Total entries (max FAULT_LOG_MAX)
+  
+  void init() { head = 0; count = 0; memset(entries, 0, sizeof(entries)); }
+  
+  void add(uint8_t channel, uint8_t reason, float temp, float power, const char* mode_str) {
+    entries[head].timestamp_ms = millis();
+    entries[head].channel = channel;
+    entries[head].fault_reason = reason;
+    entries[head].temp_at_fault = temp;
+    entries[head].power_at_fault = power;
+    strncpy(entries[head].mode, mode_str, 15);
+    entries[head].mode[15] = '\0';
+    head = (head + 1) % FAULT_LOG_MAX;
+    if (count < FAULT_LOG_MAX) count++;
+  }
+  
+  // Get entry by index (0 = newest)
+  FaultLogEntry* get(int idx) {
+    if (idx < 0 || idx >= count) return nullptr;
+    int pos = (head - 1 - idx + FAULT_LOG_MAX) % FAULT_LOG_MAX;
+    return &entries[pos];
+  }
+};
+
+FaultLog faultLog;
+
+// Track previous fault state to detect new faults (avoid duplicate logging)
+static uint8_t prev_fault_state[3] = {0, 0, 0};
+
+// Forward declaration - defined after all globals
+const char* getCurrentModeStr();
+
 // Human-readable fault labels (keep in sync with enum)
 const char* faultReasonStr(uint8_t code) {
   switch (code) {
@@ -122,10 +190,10 @@ struct SharedData {
   uint8_t auto_step;     // 0=Off, 1=Cycle1, 2=Cycle2, 3=Cycle3
   bool auto_mode_enabled;
   bool auto_was_started;
-  bool manual_was_started;
-  bool manual_preset_running;
-  uint8_t manual_preset_index;  // 0-2
-  bool manual_mode_enabled;
+  bool preset_was_started;
+  bool preset_running;
+  uint8_t preset_index;  // 0-2
+  bool preset_mode_enabled;
 };
 
 SharedData sysState;
@@ -146,7 +214,8 @@ SPISettings maxSettings(1000000, MSBFIRST, SPI_MODE0);
 TFT_eSPI tft = TFT_eSPI();
 Preferences preferences;
 void saveConfig(const ConfigState& config);
-UIManager ui(&tft, saveConfig);
+void saveWiFiConfig(const WiFiConfig& wifi);
+UIManager ui(&tft, saveConfig, saveWiFiConfig);
 ConfigState config;
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
 Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
@@ -191,10 +260,21 @@ long lastEncoderValue = 0;
 
 // ========== [Forward Declarations] ==========
 void IRAM_ATTR tpo_isr();
+
+// Helper: get current mode string for fault logging
+// (defined here because it needs sysState and has_go_to which are declared above)
+const char* getCurrentModeStr() {
+  if (!has_go_to) return "MANUAL";
+  if (sysState.auto_was_started && sysState.auto_step > 0) return "AUTO";
+  if (sysState.preset_running) return "PRESET";
+  if (sysState.preset_was_started) return "PRESET";
+  return "MANUAL";
+}
 void setup_encoder_fixed();
 void read_hardware_encoder(float* delta_out);
 void max31855_init_pins();
 void loadConfig(ConfigState& cfg);
+void loadWiFiConfig(WiFiConfig& wifi);
 void tpo_set_percent(int index, float percent);
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity, float sensor_emissivity = 0.95f);
 void setupWebServer();
@@ -400,6 +480,25 @@ void TaskMAX(void* pvParameters) {
             sysState.tc_temps[i] = final_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
             sysState.tc_fault_reason[i] = fault_reason;
+            
+            // Log new faults (only when transitioning from OK → FAULT)
+            if (is_fault && prev_fault_state[i] == 0) {
+              // Get heater power for log
+              float log_power = 0;
+              portENTER_CRITICAL(&tpoMux);
+              uint32_t on_t = tpo_on_ticks[i];
+              uint32_t win_t = tpo_window_period_ticks;
+              portEXIT_CRITICAL(&tpoMux);
+              log_power = (win_t > 0) ? (on_t * 100.0f / win_t) : 0;
+              
+              faultLog.add(i, fault_reason, final_temp, log_power, getCurrentModeStr());
+              Serial.printf("[FAULT LOG] TC%d: %s | Temp=%.1f | Power=%.0f%% | Mode=%s | t=%lums\n",
+                i+1, faultReasonStr(fault_reason), 
+                isnan(final_temp) ? -1.0f : final_temp,
+                log_power, getCurrentModeStr(), millis());
+            }
+            prev_fault_state[i] = is_fault ? 1 : 0;
+            
             if (is_fault) {
               // [BUG1 FIX] Global stop เฉพาะเมื่อ heater ตัวที่ fault นั้น active อยู่
               // ถ้า heater ตัวนั้น OFF อยู่แล้ว → ไม่ต้องทำอะไร (แค่ไม่ได้เสียบสาย)
@@ -408,9 +507,9 @@ void TaskMAX(void* pvParameters) {
 
                 // หยุดทั้งระบบทันที + ปิด heater ทุกตัว
                 has_go_to = false;
-                sysState.manual_was_started = false;
+                sysState.preset_was_started = false;
                 sysState.auto_was_started = false;
-                sysState.manual_preset_running = false;
+                sysState.preset_running = false;
                 sysState.auto_step = 0;
 
                 for (int h = 0; h < 3; h++) {
@@ -497,23 +596,25 @@ void TaskHeater1Control(void* pvParameters) {
   for (;;) {
     float current_t = NAN;
     float ir1_temp = NAN;
+    float ir1_ambient = NAN;  // For difference-mode no-object detection
     float current_wire_temp = NAN;
     uint8_t current_auto_step = 0;
     bool local_auto_started = false;
-    bool local_manual_started = false;
-    bool local_manual_preset_running = false;
+    bool local_preset_started = false;
+    bool local_preset_running = false;
     uint8_t local_preset_idx = 0;
 
     // Read shared data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       current_t = sysState.tc_temps[HEATER_IDX];
       ir1_temp = sysState.ir_temps[0];
+      ir1_ambient = sysState.ir_ambient[0];
       current_auto_step = sysState.auto_step;
       current_wire_temp = sysState.tc_probe_temp;
       local_auto_started = sysState.auto_was_started;
-      local_manual_started = sysState.manual_was_started;
-      local_manual_preset_running = sysState.manual_preset_running;
-      local_preset_idx = sysState.manual_preset_index;
+      local_preset_started = sysState.preset_was_started;
+      local_preset_running = sysState.preset_running;
+      local_preset_idx = sysState.preset_index;
       xSemaphoreGive(dataMutex);
     }
 
@@ -553,16 +654,16 @@ void TaskHeater1Control(void* pvParameters) {
       current_t = ir1_temp;
 #endif
     }
-    // 2. MANUAL PRESET MODE (only Heater 1)
-    else if (local_manual_preset_running && system_run) {
+    // 2. PRESET MODE (only Heater 1)
+    else if (local_preset_running && system_run) {
       is_active = true;
       is_auto_controlled = true;
-      target_t = config.manual_target_temps[local_preset_idx];
-      max_t = config.manual_max_temps[local_preset_idx];
+      target_t = config.preset_target_temps[local_preset_idx];
+      max_t = config.preset_max_temps[local_preset_idx];
     }
-    // 3. STANDBY / BASIC MANUAL
+    // 3. MANUAL MODE (basic heater control)
     else {
-      if (!local_manual_started) {
+      if (!local_preset_started) {
         is_active = false;
       }
     }
@@ -571,16 +672,23 @@ void TaskHeater1Control(void* pvParameters) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
       
+      // Log NAN_ACTIVE fault
+      float log_power = 0;
+      portENTER_CRITICAL(&tpoMux);
+      log_power = (tpo_window_period_ticks > 0) ? (tpo_on_ticks[HEATER_IDX] * 100.0f / tpo_window_period_ticks) : 0;
+      portEXIT_CRITICAL(&tpoMux);
+      faultLog.add(HEATER_IDX, FAULT_NAN_ACTIVE, NAN, log_power, getCurrentModeStr());
+      Serial.printf("[FAULT LOG] Heater%d NAN_ACTIVE EMERGENCY STOP | Power=%.0f%%\n", HEATER_IDX+1, log_power);
+      
       if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
         if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
           sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
         has_go_to = false;
-        sysState.manual_was_started = false;
+        sysState.preset_was_started = false;
         sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
+        sysState.preset_running = false;
         sysState.auto_step = 0;
-        // ปิด heater ทุกตัว
         for (int h = 0; h < 3; h++) {
           config.heater_active[h] = false;
         }
@@ -660,7 +768,20 @@ void TaskHeater1Control(void* pvParameters) {
           if (control_temp > peak_temp) peak_temp = control_temp;
         }
 
-        if (has_reached_target && (control_temp < 40.0f)) {
+#ifdef AUTO_USE_DIFFERENCE_MODE
+        // [DIFFERENCE MODE] Object removed = temp dropped significantly from peak
+        // Works with wide-FOV IR (90°) where ambient stays above 40°C
+        bool object_removed = has_reached_target 
+                              && (peak_temp > 0) 
+                              && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
+#else
+        // [ABSOLUTE MODE] Object removed = temp dropped below absolute threshold
+        // Original logic — works when IR reads near ambient (~25°C) after object removed
+        // bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
+        bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
+#endif
+
+        if (object_removed) {
           if (millis() - cycle_change_debounce > 1000) {
             if (current_auto_step < 3) {
               current_auto_step++;
@@ -692,35 +813,69 @@ void TaskHeater1Control(void* pvParameters) {
       auto_low_temp_timer = 0;
     }
 
+    // === AUTO MODE SAFETY: No-object detection ===
+    // If heater is running but no object is present for extended time → auto-stop
     if (auto_is_running && has_go_to) {
-      if (!isnan(ir1_temp) && ir1_temp < 40.0f) {
-        
+
+#ifdef AUTO_USE_DIFFERENCE_MODE
+      // [DIFFERENCE MODE] No object = IR reads within margin of ambient temp
+      // Wide-FOV IR (90°) picks up heater radiation, so ambient alone may read >40°C.
+      // Instead, check if (ir_object - ir_ambient) is small → no object on heater.
+      bool no_object = false;
+      if (!isnan(ir1_temp) && !isnan(ir1_ambient)) {
+        float ir_diff = ir1_temp - ir1_ambient;
+        no_object = (ir_diff < AUTO_NO_OBJECT_MARGIN);
+      }
+      if (no_object) {
+        if (auto_low_temp_timer == 0) {
+          auto_low_temp_timer = millis();
+        }
+        else if (millis() - auto_low_temp_timer > AUTO_NO_OBJECT_TIMEOUT) {
+          // No object detected for too long → stop
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            has_go_to = false;
+            sysState.auto_was_started = false;
+            sysState.auto_step = 0;
+            sysState.preset_was_started = false;
+            sysState.preset_running = false;
+            xSemaphoreGive(dataMutex);
+          }
+          beep_mode = 3;
+          beep_queue = 4;
+          auto_low_temp_timer = 0;
+        }
+      } else {
+        // Object present (IR - ambient >= margin) → reset timer
+        auto_low_temp_timer = 0;
+      }
+#else
+      // [ABSOLUTE MODE] No object = IR reads below absolute threshold
+      // Original logic — works when IR reads near room temp (~25°C) after object removed
+      // if (!isnan(ir1_temp) && ir1_temp < 40.0f) { ... }
+      if (!isnan(ir1_temp) && ir1_temp < AUTO_ABS_SAFETY_TEMP) {
         if (auto_low_temp_timer == 0) {
           auto_low_temp_timer = millis(); 
         } 
-        else if (millis() - auto_low_temp_timer > 30000) {
-          
+        else if (millis() - auto_low_temp_timer > AUTO_ABS_SAFETY_MS) {
           // สั่ง Stop การทำงาน
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
             has_go_to = false;               
             sysState.auto_was_started = false; 
             sysState.auto_step = 0;        
-            
-            sysState.manual_was_started = false;
-            sysState.manual_preset_running = false;
-            
+            sysState.preset_was_started = false;
+            sysState.preset_running = false;
             xSemaphoreGive(dataMutex);
           }
-          
           beep_mode = 3; 
           beep_queue = 4; 
-
           auto_low_temp_timer = 0; 
         }
       } else {
-        // ถ้าอุณหภูมิเกิน 40 หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
+        // ถ้าอุณหภูมิเกิน threshold หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
         auto_low_temp_timer = 0; 
       }
+#endif
+
     } else {
       // ถ้าไม่ได้รัน Auto ก็รีเซ็ตเวลาทิ้ง
       auto_low_temp_timer = 0;
@@ -771,16 +926,16 @@ void TaskHeater2Control(void* pvParameters) {
 
   for (;;) {
     float current_t = NAN;
-    bool local_manual_started = false;
+    bool local_preset_started = false;
     bool local_auto_running = false;
     bool local_preset_running = false;
 
     // Read shared data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       current_t = sysState.tc_temps[HEATER_IDX];
-      local_manual_started = sysState.manual_was_started;
+      local_preset_started = sysState.preset_was_started;
       local_auto_running = sysState.auto_was_started;
-      local_preset_running = sysState.manual_preset_running;
+      local_preset_running = sysState.preset_running;
       xSemaphoreGive(dataMutex);
     }
 
@@ -790,7 +945,7 @@ void TaskHeater2Control(void* pvParameters) {
 
     if (local_auto_running || local_preset_running) {
       is_active = false;
-    } else if (!local_manual_started) {
+    } else if (!local_preset_started) {
       is_active = false;
     }
     // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
@@ -798,14 +953,22 @@ void TaskHeater2Control(void* pvParameters) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
       
+      // Log NAN_ACTIVE fault
+      float log_power = 0;
+      portENTER_CRITICAL(&tpoMux);
+      log_power = (tpo_window_period_ticks > 0) ? (tpo_on_ticks[HEATER_IDX] * 100.0f / tpo_window_period_ticks) : 0;
+      portEXIT_CRITICAL(&tpoMux);
+      faultLog.add(HEATER_IDX, FAULT_NAN_ACTIVE, NAN, log_power, getCurrentModeStr());
+      Serial.printf("[FAULT LOG] Heater%d NAN_ACTIVE EMERGENCY STOP | Power=%.0f%%\n", HEATER_IDX+1, log_power);
+      
       if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
         if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
           sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
         has_go_to = false;
-        sysState.manual_was_started = false;
+        sysState.preset_was_started = false;
         sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
+        sysState.preset_running = false;
         sysState.auto_step = 0;
         // ปิด heater ทุกตัว
         for (int h = 0; h < 3; h++) {
@@ -919,14 +1082,14 @@ void TaskHeater3Control(void* pvParameters) {
 
   for (;;) {
     float current_t = NAN;
-    bool local_manual_started = false;
+    bool local_preset_started = false;
 
     // Read shared data
     if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
       current_t = sysState.tc_temps[HEATER_IDX];
-      local_manual_started = sysState.manual_was_started;
+      local_preset_started = sysState.preset_was_started;
       local_auto_running = sysState.auto_was_started;
-      local_preset_running = sysState.manual_preset_running;
+      local_preset_running = sysState.preset_running;
       xSemaphoreGive(dataMutex);
     }
 
@@ -936,7 +1099,7 @@ void TaskHeater3Control(void* pvParameters) {
 
     if (local_auto_running || local_preset_running) {
       is_active = false;
-    } else if (!local_manual_started) {
+    } else if (!local_preset_started) {
       is_active = false;
     }
     // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
@@ -944,14 +1107,22 @@ void TaskHeater3Control(void* pvParameters) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
       
+      // Log NAN_ACTIVE fault
+      float log_power = 0;
+      portENTER_CRITICAL(&tpoMux);
+      log_power = (tpo_window_period_ticks > 0) ? (tpo_on_ticks[HEATER_IDX] * 100.0f / tpo_window_period_ticks) : 0;
+      portEXIT_CRITICAL(&tpoMux);
+      faultLog.add(HEATER_IDX, FAULT_NAN_ACTIVE, NAN, log_power, getCurrentModeStr());
+      Serial.printf("[FAULT LOG] Heater%d NAN_ACTIVE EMERGENCY STOP | Power=%.0f%%\n", HEATER_IDX+1, log_power);
+      
       if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
         if (sysState.tc_fault_reason[HEATER_IDX] == FAULT_NONE) {
           sysState.tc_fault_reason[HEATER_IDX] = FAULT_NAN_ACTIVE;
         }
         has_go_to = false;
-        sysState.manual_was_started = false;
+        sysState.preset_was_started = false;
         sysState.auto_was_started = false;
-        sysState.manual_preset_running = false;
+        sysState.preset_running = false;
         sysState.auto_step = 0;
         // ปิด heater ทุกตัว
         for (int h = 0; h < 3; h++) {
@@ -1075,12 +1246,12 @@ void TaskInput(void* pvParameters) {
       if (!ignore_release && (millis() - press_start_time > LONG_PRESS_MS)) {
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
           UIScreen scr = ui.getScreen();
-          if (scr == SCREEN_STANDBY) {
+          if (scr == SCREEN_MANUAL) {
             ui.enterQuickEdit();
           } else if (scr == SCREEN_AUTO_MODE) {
             ui.enterQuickEditAuto();
-          } else if (scr == SCREEN_MANUAL_MODE) {
-            ui.enterQuickEditManual();
+          } else if (scr == SCREEN_PRESET_MODE) {
+            ui.enterQuickEditPreset();
           } else {
             ui.handleButtonHold(config);
           }
@@ -1094,11 +1265,11 @@ void TaskInput(void* pvParameters) {
         if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
           UIScreen scr = ui.getScreen();
           ui.handleButtonSingleClick(config, go_to, has_go_to);
-          if (scr == SCREEN_MANUAL_MODE) {
-            sysState.manual_preset_index = ui.getManualConfirmedPreset();
+          if (scr == SCREEN_PRESET_MODE) {
+            sysState.preset_index = ui.getPresetConfirmedPreset();
             if (has_go_to) {
-               sysState.manual_preset_running = true;
-               sysState.manual_was_started = true;
+               sysState.preset_running = true;
+               sysState.preset_was_started = true;
                
                sysState.auto_was_started = false;
                sysState.auto_step = 0;
@@ -1121,7 +1292,7 @@ void TaskInput(void* pvParameters) {
           if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
             // Button 0: Settings
             if (ui.getScreen() == SCREEN_SLEEP) {
-              ui.switchToStandby();
+              ui.switchToManual();
               ui.resetInactivityTimer();
               xSemaphoreGive(dataMutex);
               pcf_state.btn_pressed[i] = btn[i];
@@ -1129,7 +1300,7 @@ void TaskInput(void* pvParameters) {
             }
             if (i == 0) {
               UIScreen scr = ui.getScreen();
-              if (scr == SCREEN_STANDBY || scr == SCREEN_AUTO_MODE || scr == SCREEN_MANUAL_MODE) {
+              if (scr == SCREEN_MANUAL || scr == SCREEN_AUTO_MODE || scr == SCREEN_PRESET_MODE) {
                 ui.openSettings();
               } else {
                 ui.exitSettings();
@@ -1139,14 +1310,14 @@ void TaskInput(void* pvParameters) {
             else if (i == 1) {
               UIScreen current = ui.getScreen();
 
-              bool isAnyRunning = sysState.manual_was_started || sysState.auto_was_started || sysState.manual_preset_running;
+              bool isAnyRunning = sysState.preset_was_started || sysState.auto_was_started || sysState.preset_running;
 
               if (isAnyRunning) {
                 // --- CASE: STOP ---
-                sysState.manual_was_started = false;
+                sysState.preset_was_started = false;
                 sysState.auto_was_started = false;
                 sysState.auto_step = 0;
-                sysState.manual_preset_running = false;
+                sysState.preset_running = false;
                 has_go_to = false;
 
               } else {
@@ -1157,14 +1328,14 @@ void TaskInput(void* pvParameters) {
                 }
 
                 // --- CASE: START ---
-                if (current == SCREEN_STANDBY) {
-                  // Manual/Standby ใช้ Heater ตัวไหนก็ได้ → เช็คว่ามี heater active อย่างน้อย 1 ตัว
+                if (current == SCREEN_MANUAL) {
+                  // Manual mode ใช้ Heater ตัวไหนก็ได้ → เช็คว่ามี heater active อย่างน้อย 1 ตัว
                   bool any_heater_ok = false;
                   for (int h = 0; h < 3; h++) {
                     if (config.heater_active[h] && sysState.tc_faults[h] == 0) { any_heater_ok = true; break; }
                   }
                   if (any_heater_ok) {
-                    sysState.manual_was_started = true;
+                    sysState.preset_was_started = true;
                     has_go_to = true;
                   } else {
                     beep_mode = 3;
@@ -1182,14 +1353,14 @@ void TaskInput(void* pvParameters) {
                     has_go_to = true;
                   }
 
-                } else if (current == SCREEN_MANUAL_MODE) {
+                } else if (current == SCREEN_PRESET_MODE) {
                   // Preset ต้องใช้ Heater 1 เท่านั้น
                   if (h1_fault) {
                     beep_mode = 3;
                     beep_queue = 2;
                   } else {
-                    sysState.manual_preset_running = true;
-                    sysState.manual_preset_index = ui.getManualConfirmedPreset();
+                    sysState.preset_running = true;
+                    sysState.preset_index = ui.getPresetConfirmedPreset();
                     has_go_to = true;
                   }
                 }
@@ -1198,22 +1369,22 @@ void TaskInput(void* pvParameters) {
             // Button 3: Mode Toggle
             else if (i == 2) {
               UIScreen current = ui.getScreen();
-              if (current == SCREEN_STANDBY || current == SCREEN_QUICK_EDIT) {
+              if (current == SCREEN_MANUAL || current == SCREEN_QUICK_EDIT) {
                 ui.switchToAutoMode();
                 sysState.auto_mode_enabled = true;
-                sysState.manual_mode_enabled = false;
+                sysState.preset_mode_enabled = false;
               } else if (current == SCREEN_AUTO_MODE || current == SCREEN_QUICK_EDIT_AUTO) {
-                ui.switchToManualMode();
+                ui.switchToPresetMode();
                 sysState.auto_mode_enabled = false;
-                sysState.manual_mode_enabled = true;
-              } else if (current == SCREEN_MANUAL_MODE || current == SCREEN_QUICK_EDIT_MANUAL) {
-                ui.switchToStandby();
+                sysState.preset_mode_enabled = true;
+              } else if (current == SCREEN_PRESET_MODE || current == SCREEN_QUICK_EDIT_PRESET) {
+                ui.switchToManual();
                 sysState.auto_mode_enabled = false;
-                sysState.manual_mode_enabled = false;
+                sysState.preset_mode_enabled = false;
               } else {
-                ui.switchToStandby();
+                ui.switchToManual();
                 sysState.auto_mode_enabled = false;
-                sysState.manual_mode_enabled = false;
+                sysState.preset_mode_enabled = false;
               }
             }
             saveConfig(config);
@@ -1281,11 +1452,11 @@ void TaskDisplay(void* pvParameters) {
       st.auto_step = sysState.auto_step;
       st.auto_mode_enabled = sysState.auto_mode_enabled;
       st.auto_running_background = (has_go_to && sysState.auto_was_started && sysState.auto_step > 0);
-      st.manual_running_background = (has_go_to && sysState.manual_was_started);
-      st.manual_preset_running = sysState.manual_preset_running && has_go_to;
-      st.manual_was_started = sysState.manual_was_started;
-      st.manual_preset_index = sysState.manual_preset_index;
-      st.manual_mode_enabled = sysState.manual_mode_enabled;
+      st.preset_running_background = (has_go_to && sysState.preset_was_started);
+      st.preset_running = sysState.preset_running && has_go_to;
+      st.preset_was_started = sysState.preset_was_started;
+      st.preset_index = sysState.preset_index;
+      st.preset_mode_enabled = sysState.preset_mode_enabled;
       st.tc_probe_temp = sysState.tc_probe_temp;
       st.tc_probe_peak = sysState.tc_probe_peak;
       st.ir_temps[0] = sysState.ir_temps[0];
@@ -1440,12 +1611,13 @@ void setup() {
   sysState.auto_step = 0;
   sysState.auto_mode_enabled = false;
   sysState.auto_was_started = false;
-  sysState.manual_was_started = false;
-  sysState.manual_preset_running = false;
-  sysState.manual_preset_index = 0;
-  sysState.manual_mode_enabled = false;
+  sysState.preset_was_started = false;
+  sysState.preset_running = false;
+  sysState.preset_index = 0;
+  sysState.preset_mode_enabled = false;
 
-  // Setup WiFi in background (Non-Blocking)
+  // Initialize Fault Log
+  faultLog.init();
   Serial.println("[Setup] WiFi will be managed by background task");
 
   preferences.begin("app_config", false);
@@ -1457,8 +1629,8 @@ void setup() {
       config.auto_max_temps[i] = 250.0f;
     }
     for (int i = 0; i < 4; i++) {
-      config.manual_target_temps[i] = 100.0f;
-      config.manual_max_temps[i] = 250.0f;
+      config.preset_target_temps[i] = 100.0f;
+      config.preset_max_temps[i] = 250.0f;
     }
     saveConfig(config);
   }
@@ -1564,7 +1736,7 @@ void setup() {
       }
       if (sensors_ok) {
         has_go_to = true;
-        sysState.manual_was_started = true;
+        sysState.preset_was_started = true;
         Serial.println("Startup: Auto-Run Activated (sensors OK)");
       } else {
         Serial.println("Startup: Auto-Run CANCELLED (sensor fault)");
@@ -1596,7 +1768,7 @@ void setupWebServer() {
     uint8_t faults[3] = {0};
     uint8_t fault_reasons[3] = {0};
     bool cutoff[3] = {false}, ready[3] = {false};
-    bool manual_started = false, auto_started = false, preset_running = false;
+    bool preset_started = false, auto_started = false, preset_running = false;
     uint8_t a_step = 0, preset_idx = 0;
     uint32_t on_ticks[3] = {0};
     
@@ -1615,10 +1787,10 @@ void setupWebServer() {
       }
       probe_temp = sysState.tc_probe_temp;
       probe_peak = sysState.tc_probe_peak;
-      manual_started = sysState.manual_was_started;
+      preset_started = sysState.preset_was_started;
       auto_started = sysState.auto_was_started;
-      preset_running = sysState.manual_preset_running;
-      preset_idx = sysState.manual_preset_index;
+      preset_running = sysState.preset_running;
+      preset_idx = sysState.preset_index;
       a_step = sysState.auto_step;
       xSemaphoreGive(dataMutex);
     }
@@ -1636,14 +1808,14 @@ void setupWebServer() {
     }
     
     // Determine current mode
-    String mode = "STANDBY";
+    String mode = "MANUAL";
     if (has_go_to) {
       if (auto_started && a_step > 0) {
         mode = "AUTO_CYCLE_" + String(a_step);
       } else if (preset_running) {
         mode = "PRESET_" + String(preset_idx + 1);
-      } else if (manual_started) {
-        mode = "MANUAL";
+      } else if (preset_started) {
+        mode = "PRESET";
       }
     }
     
@@ -1677,13 +1849,28 @@ void setupWebServer() {
     json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
     json += "},";
     
-    // Heaters status
+    // Heaters status - with mode-aware target/max
     json += "\"heaters\":[";
     for (int i = 0; i < 3; i++) {
+      // Determine effective target/max based on current mode
+      float eff_target = config.target_temps[i];
+      float eff_max = config.max_temps[i];
+      
+      if (i == 0) {  // Heater 1 uses auto/preset overrides
+        if (auto_started && a_step > 0) {
+          int cycle_idx = a_step - 1;
+          eff_target = config.auto_target_temps[cycle_idx];
+          eff_max = config.auto_max_temps[cycle_idx];
+        } else if (preset_running) {
+          eff_target = config.preset_target_temps[preset_idx];
+          eff_max = config.preset_max_temps[preset_idx];
+        }
+      }
+      
       json += "{";
       json += "\"active\":" + String(config.heater_active[i] ? "true" : "false") + ",";
-      json += "\"target\":" + String(config.target_temps[i], 1) + ",";
-      json += "\"max\":" + String(config.max_temps[i], 1) + ",";
+      json += "\"target\":" + String(eff_target, 1) + ",";
+      json += "\"max\":" + String(eff_max, 1) + ",";
       json += "\"power\":" + String(power[i], 1) + ",";
       json += "\"cutoff\":" + String(cutoff[i] ? "true" : "false") + ",";
       json += "\"ready\":" + String(ready[i] ? "true" : "false") + ",";
@@ -1716,10 +1903,53 @@ void setupWebServer() {
     json += "\"wifi\":{";
     json += "\"rssi\":" + String(wifiSignalStrength) + ",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
-    json += "}";
+    json += "},";
+    
+    // Fault Log (last 10 entries for main status, full log via /api/fault_log)
+    json += "\"fault_log\":[";
+    int log_show = min(faultLog.count, 10);
+    for (int i = 0; i < log_show; i++) {
+      FaultLogEntry* e = faultLog.get(i);
+      if (!e) continue;
+      if (i > 0) json += ",";
+      // Convert millis to uptime string (HH:MM:SS)
+      uint32_t sec = e->timestamp_ms / 1000;
+      uint32_t h = sec / 3600; uint32_t m = (sec % 3600) / 60; uint32_t s = sec % 60;
+      char ts[16]; snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu", h, m, s);
+      json += "{\"time\":\"" + String(ts) + "\",";
+      json += "\"ch\":\"TC" + String(e->channel + 1) + "\",";
+      json += "\"reason\":\"" + String(faultReasonStr(e->fault_reason)) + "\",";
+      json += "\"temp\":" + (isnan(e->temp_at_fault) ? String("null") : String(e->temp_at_fault, 1)) + ",";
+      json += "\"power\":" + String(e->power_at_fault, 0) + ",";
+      json += "\"mode\":\"" + String(e->mode) + "\"}";
+    }
+    json += "]";
     
     json += "}";
     
+    request->send(200, "application/json", json);
+  });
+
+  // ========== [1b. FAULT LOG API - Full history] ==========
+  server.on("/api/fault_log", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String json = "{\"fault_log\":[";
+    for (int i = 0; i < faultLog.count; i++) {
+      FaultLogEntry* e = faultLog.get(i);
+      if (!e) continue;
+      if (i > 0) json += ",";
+      uint32_t sec = e->timestamp_ms / 1000;
+      uint32_t h = sec / 3600; uint32_t m = (sec % 3600) / 60; uint32_t s = sec % 60;
+      char ts[16]; snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu", h, m, s);
+      json += "{\"time\":\"" + String(ts) + "\",";
+      json += "\"ms\":" + String(e->timestamp_ms) + ",";
+      json += "\"ch\":\"TC" + String(e->channel + 1) + "\",";
+      json += "\"reason\":\"" + String(faultReasonStr(e->fault_reason)) + "\",";
+      json += "\"reason_code\":" + String(e->fault_reason) + ",";
+      json += "\"temp\":" + (isnan(e->temp_at_fault) ? String("null") : String(e->temp_at_fault, 1)) + ",";
+      json += "\"power\":" + String(e->power_at_fault, 0) + ",";
+      json += "\"mode\":\"" + String(e->mode) + "\"}";
+    }
+    json += "],\"total\":" + String(faultLog.count) + ",\"max\":" + String(FAULT_LOG_MAX) + "}";
     request->send(200, "application/json", json);
   });
 
@@ -1763,8 +1993,8 @@ void setupWebServer() {
       font-weight: bold;
       font-size: 1.1em;
     }
-    .mode-STANDBY { background: #666; }
-    .mode-MANUAL { background: #2ecc71; }
+    .mode-MANUAL { background: #666; }
+    .mode-PRESET { background: #2ecc71; }
     .mode-AUTO { background: #e74c3c; }
     .mode-PRESET { background: #f39c12; }
     
@@ -1866,6 +2096,32 @@ void setupWebServer() {
       border-radius: 5px;
     }
     
+    .fault-log-panel {
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    .fault-log-panel h3 { color: #f39c12; margin-bottom: 10px; }
+    .fault-log-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85em;
+    }
+    .fault-log-table th {
+      text-align: left;
+      padding: 6px 8px;
+      border-bottom: 2px solid rgba(255,255,255,0.2);
+      color: #888;
+      font-weight: normal;
+    }
+    .fault-log-table td {
+      padding: 5px 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+    .fault-log-table tr:hover { background: rgba(255,255,255,0.05); }
+    .fault-log-empty { color: #666; text-align: center; padding: 20px; }
+    
     #chart-container {
       background: rgba(0,0,0,0.3);
       border-radius: 10px;
@@ -1905,7 +2161,7 @@ void setupWebServer() {
         <span class="update-indicator" id="updateIndicator"></span>
         <span id="lastUpdate">Connecting...</span>
       </div>
-      <div id="modeDisplay" class="mode-badge mode-STANDBY">STANDBY</div>
+      <div id="modeDisplay" class="mode-badge mode-MANUAL">MANUAL</div>
       <div>WiFi: <span id="wifiRssi">--</span> dBm</div>
     </div>
     
@@ -2032,6 +2288,14 @@ void setupWebServer() {
       </div>
     </div>
     
+    <!-- Fault History Log -->
+    <div class="fault-log-panel">
+      <h3>📋 Fault History</h3>
+      <div id="faultLogContent">
+        <div class="fault-log-empty">No faults recorded since boot</div>
+      </div>
+    </div>
+    
     <div class="footer">
       <a href="/update">🔄 OTA Update</a>
       <span>|</span>
@@ -2102,8 +2366,7 @@ void setupWebServer() {
       modeEl.className = 'mode-badge';
       if (data.mode.includes('AUTO')) modeEl.classList.add('mode-AUTO');
       else if (data.mode.includes('PRESET')) modeEl.classList.add('mode-PRESET');
-      else if (data.mode === 'MANUAL') modeEl.classList.add('mode-MANUAL');
-      else modeEl.classList.add('mode-STANDBY');
+      else modeEl.classList.add('mode-MANUAL');
       
       // Update heaters
       data.heaters.forEach((h, i) => {
@@ -2172,6 +2435,28 @@ void setupWebServer() {
       
       // Add to chart
       addChartData(data.temperatures.tc, data.temperatures.ir);
+      
+      // Fault History Log
+      const faultLogEl = document.getElementById('faultLogContent');
+      if (data.fault_log && data.fault_log.length > 0) {
+        let html = '<table class="fault-log-table"><thead><tr>';
+        html += '<th>Uptime</th><th>Channel</th><th>Fault Reason</th><th>Temp</th><th>Power</th><th>Mode</th>';
+        html += '</tr></thead><tbody>';
+        data.fault_log.forEach(f => {
+          html += '<tr>';
+          html += '<td>' + f.time + '</td>';
+          html += '<td>' + f.ch + '</td>';
+          html += '<td style="color:#e74c3c">' + f.reason + '</td>';
+          html += '<td>' + (f.temp !== null ? f.temp.toFixed(1) + ' °C' : 'NaN') + '</td>';
+          html += '<td>' + f.power + '%</td>';
+          html += '<td>' + f.mode + '</td>';
+          html += '</tr>';
+        });
+        html += '</tbody></table>';
+        faultLogEl.innerHTML = html;
+      } else {
+        faultLogEl.innerHTML = '<div class="fault-log-empty">✅ No faults recorded since boot</div>';
+      }
       
       // Update timestamp
       document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
@@ -2309,8 +2594,71 @@ void read_hardware_encoder(float* delta_out) {
 }
 
 void saveConfig(const ConfigState& cfg) {
+  // Save main config blob (WiFi is also in here but loadConfig overrides from separate keys)
   preferences.putBytes("config", &cfg, sizeof(cfg));
   setBrightness(cfg.brightness);
+}
+
+// ========== [WiFi Config — Separate NVS Storage] ==========
+// WiFi settings are stored as individual NVS keys to prevent corruption
+// from ConfigState blob writes (size mismatch, power-loss, etc.)
+
+void saveWiFiConfig(const WiFiConfig& wifi) {
+  preferences.putString("wifi_ssid", wifi.ssid);
+  preferences.putString("wifi_pass", wifi.password);
+  preferences.putBool("wifi_custom", wifi.use_custom);
+  Serial.printf("[WiFi Config] Saved separately — SSID='%s' use_custom=%d\n", 
+    wifi.ssid, wifi.use_custom);
+}
+
+void loadWiFiConfig(WiFiConfig& wifi) {
+  // Try loading from separate NVS keys first
+  String ssid = preferences.getString("wifi_ssid", "");
+  String pass = preferences.getString("wifi_pass", "");
+  bool use_custom = preferences.getBool("wifi_custom", false);
+  
+  if (ssid.length() > 0 || use_custom) {
+    // Separate keys exist — use them (authoritative source)
+    memset(&wifi, 0, sizeof(WiFiConfig));
+    strncpy(wifi.ssid, ssid.c_str(), WIFI_SSID_MAX_LEN);
+    wifi.ssid[WIFI_SSID_MAX_LEN] = '\0';
+    strncpy(wifi.password, pass.c_str(), WIFI_PASS_MAX_LEN);
+    wifi.password[WIFI_PASS_MAX_LEN] = '\0';
+    wifi.use_custom = use_custom;
+    Serial.printf("[WiFi Config] Loaded from separate keys — SSID='%s' use_custom=%d\n",
+      wifi.ssid, wifi.use_custom);
+  } else {
+    // No separate keys yet — check if blob has valid WiFi data (migration)
+    bool blob_valid = true;
+    if (wifi.ssid[0] == (char)0xFF || wifi.password[0] == (char)0xFF) {
+      blob_valid = false;
+    }
+    if (blob_valid) {
+      for (int i = 0; i < WIFI_SSID_MAX_LEN && wifi.ssid[i] != '\0'; i++) {
+        if (wifi.ssid[i] < 0x20 || wifi.ssid[i] > 0x7E) { blob_valid = false; break; }
+      }
+    }
+    if (blob_valid) {
+      for (int i = 0; i < WIFI_PASS_MAX_LEN && wifi.password[i] != '\0'; i++) {
+        if (wifi.password[i] < 0x20 || wifi.password[i] > 0x7E) { blob_valid = false; break; }
+      }
+    }
+    
+    if (blob_valid && wifi.use_custom && strlen(wifi.ssid) > 0) {
+      // Migrate from blob to separate keys
+      Serial.println("[WiFi Config] Migrating from blob to separate NVS keys");
+      saveWiFiConfig(wifi);
+    } else {
+      // No valid WiFi config anywhere — reset to defaults
+      Serial.println("[WiFi Config] No valid config found — using defaults");
+      memset(&wifi, 0, sizeof(WiFiConfig));
+      wifi.use_custom = false;
+    }
+  }
+  
+  // Always ensure null terminators
+  wifi.ssid[WIFI_SSID_MAX_LEN] = '\0';
+  wifi.password[WIFI_PASS_MAX_LEN] = '\0';
 }
 
 void loadConfig(ConfigState& cfg) {
@@ -2327,36 +2675,8 @@ void loadConfig(ConfigState& cfg) {
     Serial.printf("[Config] Size mismatch: stored=%d, expected=%d. Partial load.\n", stored_len, sizeof(cfg));
   }
 
-  // Validate WiFi config — check for corrupted/uninitialized strings
-  bool wifi_corrupted = false;
-  if (cfg.wifi_config.ssid[0] == (char)0xFF || cfg.wifi_config.password[0] == (char)0xFF) {
-    wifi_corrupted = true;
-  }
-  // Check for non-printable characters in SSID/password (corruption indicator)
-  if (!wifi_corrupted) {
-    for (int i = 0; i < WIFI_SSID_MAX_LEN && cfg.wifi_config.ssid[i] != '\0'; i++) {
-      if (cfg.wifi_config.ssid[i] < 0x20 || cfg.wifi_config.ssid[i] > 0x7E) {
-        wifi_corrupted = true;
-        break;
-      }
-    }
-  }
-  if (!wifi_corrupted) {
-    for (int i = 0; i < WIFI_PASS_MAX_LEN && cfg.wifi_config.password[i] != '\0'; i++) {
-      if (cfg.wifi_config.password[i] < 0x20 || cfg.wifi_config.password[i] > 0x7E) {
-        wifi_corrupted = true;
-        break;
-      }
-    }
-  }
-  if (wifi_corrupted) {
-    Serial.println("[Config] WiFi config corrupted — resetting to defaults");
-    memset(&cfg.wifi_config, 0, sizeof(WiFiConfig));
-    cfg.wifi_config.use_custom = false;
-  }
-  // Ensure null terminators
-  cfg.wifi_config.ssid[WIFI_SSID_MAX_LEN] = '\0';
-  cfg.wifi_config.password[WIFI_PASS_MAX_LEN] = '\0';
+  // WiFi config is ALWAYS loaded from separate NVS keys (overrides blob)
+  loadWiFiConfig(cfg.wifi_config);
 
   if (cfg.brightness == 0 && cfg.wifi_config.use_custom == false) cfg.brightness = 100;
 }

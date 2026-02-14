@@ -5,12 +5,12 @@
 
 enum UIScreen {
   SCREEN_BOOT,
-  SCREEN_STANDBY,
+  SCREEN_MANUAL,
   SCREEN_AUTO_MODE,
-  SCREEN_MANUAL_MODE,
+  SCREEN_PRESET_MODE,
   SCREEN_QUICK_EDIT,
   SCREEN_QUICK_EDIT_AUTO,
-  SCREEN_QUICK_EDIT_MANUAL,
+  SCREEN_QUICK_EDIT_PRESET,
   SCREEN_SLEEP,
   SCREEN_SETTINGS_PAGE_1, 
   SCREEN_SETTINGS_PAGE_2, 
@@ -99,8 +99,8 @@ struct ConfigState {
   float max_temp_lock;
   float auto_target_temps[3]; 
   float auto_max_temps[3];
-  float manual_target_temps[4];  // 4 presets for Manual Mode
-  float manual_max_temps[4];     // 4 presets for Manual Mode
+  float preset_target_temps[4];  // 4 presets for Preset Mode
+  float preset_max_temps[4];     // 4 presets for Preset Mode
   char temp_unit;
   IdleOffMode idle_off_mode;
   bool light_on;
@@ -131,11 +131,11 @@ struct AppState {
   uint8_t auto_step;
   bool auto_mode_enabled;        
   bool auto_running_background;  
-  bool manual_running_background; 
-  bool manual_mode_enabled;       
-  bool manual_preset_running;     
-  bool manual_was_started;
-  uint8_t manual_preset_index;
+  bool preset_running_background; 
+  bool preset_mode_enabled;       
+  bool preset_running;     
+  bool preset_was_started;
+  uint8_t preset_index;
   char ip_address[20];
   bool is_warning;
 };
@@ -146,11 +146,12 @@ enum QuickEditStep {
 };
 
 typedef void (*ConfigSaveCallback)(const ConfigState& config);
-typedef void (*WiFiReconnectCallback)();  // NEW: Callback to trigger WiFi reconnection
+typedef void (*WiFiSaveCallback)(const WiFiConfig& wifi);  // Saves WiFi config separately
+typedef void (*WiFiReconnectCallback)();  // Callback to trigger WiFi reconnection
 
 class UIManager {
 public:
-  UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback = nullptr);
+  UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback = nullptr, WiFiSaveCallback wifi_save_callback = nullptr);
   void begin();
   
   void draw(const AppState& state, const ConfigState& config);
@@ -166,15 +167,15 @@ public:
   void exitSettings();           
   void enterQuickEdit();
   void enterQuickEditAuto();
-  void enterQuickEditManual();
+  void enterQuickEditPreset();
   void switchToAutoMode();
-  void switchToManualMode();
-  void switchToStandby();
+  void switchToPresetMode();
+  void switchToManual();
   UIScreen getScreen() const { return _current_screen; } 
 
-  int getManualSelection() const { return _manual_selection; }
-  int getManualConfirmedPreset() const { return _manual_confirmed_preset; }
-  void setManualConfirmedPreset(int preset) { _manual_confirmed_preset = preset; }
+  int getPresetSelection() const { return _preset_selection; }
+  int getPresetConfirmedPreset() const { return _preset_confirmed_preset; }
+  void setPresetConfirmedPreset(int preset) { _preset_confirmed_preset = preset; }
   void setWiFiReconnectCallback(WiFiReconnectCallback callback) { _wifi_reconnect_callback = callback; }
 
 private:
@@ -193,16 +194,17 @@ private:
   float _menu_step_accumulator;
   float _temp_edit_value;
   
-  int _standby_selection;
+  int _manual_selection_nav;
   int _auto_selection;
-  int _manual_selection;
-  int _manual_confirmed_preset;
+  int _preset_selection;
+  int _preset_confirmed_preset;
   bool _show_warning;
   
   uint32_t _boot_start_time;
   uint32_t _last_activity_time;
 
   ConfigSaveCallback _save_callback;
+  WiFiSaveCallback _wifi_save_callback;  // Separate WiFi save
   WiFiReconnectCallback _wifi_reconnect_callback;  // NEW
 
   // NEW: Character entry variables
@@ -217,7 +219,7 @@ private:
   static int getCharsetLength();
   int findCharInCharset(char c);
 
-  void drawStandbyScreen(const AppState& state, const ConfigState& config);
+  void drawManualScreen(const AppState& state, const ConfigState& config);
   void drawSettingsPage1(const AppState& state, const ConfigState& config); 
   void drawSettingsPage2(const AppState& state, const ConfigState& config); 
   void drawSettingsPage3(const AppState& state, const ConfigState& config);   // NEW
@@ -235,7 +237,7 @@ private:
   void drawSettingsBrightness(const AppState& state);
   void drawSettingsEmissivity(const AppState& state, const ConfigState& config);
   void drawAutoModeScreen(const AppState& state, const ConfigState& config);
-  void drawManualModeScreen(const AppState& state, const ConfigState& config);
+  void drawPresetModeScreen(const AppState& state, const ConfigState& config);
 
   void drawSettingsWiFiMenu(const AppState& state, const ConfigState& config);
   void drawSettingsWiFiSSID(const AppState& state, const ConfigState& config);

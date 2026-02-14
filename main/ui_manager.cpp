@@ -25,7 +25,7 @@ enum WiFiConnectionStatus {
 #define C_NORMAL_TXT TFT_WHITE
 #define C_NORMAL_BG TFT_BLACK
 
-// Settings Theme (matches Auto/Manual/Standby light theme)
+// Settings Theme (matches Auto/Preset/Manual light theme)
 #define C_SET_BG       0xE7FB  // #f5faf0 - Light green-white background
 #define C_SET_CARD_BG   0x9E51  // #d9ead1 - Light green menu item bg (unselected)
 #define C_SET_CARD_BRD  0xDF77  // same as card bg (subtle)
@@ -108,7 +108,7 @@ const char* wifi_menu_labels[WIFI_MENU_ITEM_COUNT] = {
 const char* startup_mode_labels[STARTUP_MODE_COUNT] = { "OFF", "Auto Run" };
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = { "10 sec. (Debug)", "15 min.", "30 min.", "60 min.", "Always ON" };
 const char* temp_unit_labels[2] = { "Celsius (C)", "Fahrenheit (F)" };
-const char* standby_button_labels[6] = { "Heater1", "Heater2", "Heater3", "start", "stop", "Settings" };
+const char* manual_button_labels[6] = { "Heater1", "Heater2", "Heater3", "start", "stop", "Settings" };
 
 void drawPWMBar(TFT_eSprite* spr, int x, int y, int w, int h, float percent) {
   int num_bars = 18; // เพิ่มจาก 15 เป็น 18 ขีด
@@ -136,33 +136,33 @@ void UIManager::switchToAutoMode() {
   _current_screen = SCREEN_AUTO_MODE;
   resetInactivityTimer();
 }
-void UIManager::switchToManualMode() {
-  _previous_screen = SCREEN_MANUAL_MODE;
-  _current_screen = SCREEN_MANUAL_MODE;
-  _manual_selection = _manual_confirmed_preset;
+void UIManager::switchToPresetMode() {
+  _previous_screen = SCREEN_PRESET_MODE;
+  _current_screen = SCREEN_PRESET_MODE;
+  _preset_selection = _preset_confirmed_preset;
   resetInactivityTimer();
 }
-void UIManager::switchToStandby() {
-  _previous_screen = SCREEN_STANDBY;
-  _current_screen = SCREEN_STANDBY;
+void UIManager::switchToManual() {
+  _previous_screen = SCREEN_MANUAL;
+  _current_screen = SCREEN_MANUAL;
   resetInactivityTimer();
 }
 
 // --- Constructor ---
-UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback)
-  : _tft(tft), _spr(_tft), _save_callback(save_callback) {
+UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback, WiFiSaveCallback wifi_save_callback)
+  : _tft(tft), _spr(_tft), _save_callback(save_callback), _wifi_save_callback(wifi_save_callback) {
   _current_screen = SCREEN_BOOT;
-  _previous_screen = SCREEN_STANDBY;
+  _previous_screen = SCREEN_MANUAL;
   _quick_edit_step = Q_EDIT_TARGET;
   _blink_state = false;
   _is_editing_calibration = false;
   _selected_menu_item = 0;
   _selected_menu_item_page_2 = 0;
   _menu_step_accumulator = 0.0f;
-  _standby_selection = 0;
+  _manual_selection_nav = 0;
   _auto_selection = 0;
-  _manual_selection = 0;
-  _manual_confirmed_preset = 0;
+  _preset_selection = 0;
+  _preset_confirmed_preset = 0;
   _boot_start_time = 0;
   _show_warning = false;
 
@@ -205,7 +205,7 @@ void UIManager::exitSettings() {
 }
 
 void UIManager::enterQuickEdit() {
-  if (_standby_selection >= 0 && _standby_selection <= 2) {
+  if (_manual_selection_nav >= 0 && _manual_selection_nav <= 2) {
     _current_screen = SCREEN_QUICK_EDIT;
     _quick_edit_step = Q_EDIT_TARGET;
     _menu_step_accumulator = 0.0f;
@@ -220,9 +220,9 @@ void UIManager::enterQuickEditAuto() {
     resetInactivityTimer();
   }
 }
-void UIManager::enterQuickEditManual() {
-  if (_manual_selection >= 0 && _manual_selection <= 3) {
-    _current_screen = SCREEN_QUICK_EDIT_MANUAL;
+void UIManager::enterQuickEditPreset() {
+  if (_preset_selection >= 0 && _preset_selection <= 3) {
+    _current_screen = SCREEN_QUICK_EDIT_PRESET;
     _quick_edit_step = Q_EDIT_TARGET;
     _menu_step_accumulator = 0.0f;
     resetInactivityTimer();
@@ -297,7 +297,7 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_BOOT: 
       drawBootScreen();
       if (millis() - _boot_start_time > 3000) {
-        _current_screen = SCREEN_STANDBY; 
+        _current_screen = SCREEN_MANUAL; 
         resetInactivityTimer();           
       }
       break;
@@ -311,11 +311,11 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
       _spr.pushSprite(0, 0);
       return;
 
-    case SCREEN_STANDBY: drawStandbyScreen(state, config); break;
+    case SCREEN_MANUAL: drawManualScreen(state, config); break;
     case SCREEN_AUTO_MODE: drawAutoModeScreen(state, config); break;
-    case SCREEN_MANUAL_MODE: drawManualModeScreen(state, config); break;
-    case SCREEN_QUICK_EDIT_MANUAL: drawManualModeScreen(state, config); break;
-    case SCREEN_QUICK_EDIT: drawStandbyScreen(state, config); break;
+    case SCREEN_PRESET_MODE: drawPresetModeScreen(state, config); break;
+    case SCREEN_QUICK_EDIT_PRESET: drawPresetModeScreen(state, config); break;
+    case SCREEN_QUICK_EDIT: drawManualScreen(state, config); break;
     case SCREEN_QUICK_EDIT_AUTO: drawAutoModeScreen(state, config); break;
     case SCREEN_SETTINGS_PAGE_1: drawSettingsPage1(state, config); break;
     case SCREEN_SETTINGS_PAGE_2: drawSettingsPage2(state, config); break;
@@ -400,7 +400,7 @@ void UIManager::drawTaskBar() {
 
 void UIManager::drawHeader(const char* title) {
   drawTaskBar();
-  // Light background below taskbar (matches auto/manual/standby)
+  // Light background below taskbar (matches auto/preset/manual)
   int top_y = 24;
   _spr.fillRect(0, top_y, _spr.width(), _spr.height() - top_y, C_SET_BG);
   
@@ -1081,17 +1081,17 @@ void UIManager::drawSettingsAbout(const AppState& state) {
 
 bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool& has_go_to) {
   if (_current_screen == SCREEN_SLEEP) {
-    _current_screen = SCREEN_STANDBY;
+    _current_screen = SCREEN_MANUAL;
     resetInactivityTimer();
     return true;
   }
   resetInactivityTimer();
   switch (_current_screen) {
-    case SCREEN_STANDBY:
-      if (_standby_selection >= 0 && _standby_selection <= 2) {
-        config.heater_active[_standby_selection] = !config.heater_active[_standby_selection];
+    case SCREEN_MANUAL:
+      if (_manual_selection_nav >= 0 && _manual_selection_nav <= 2) {
+        config.heater_active[_manual_selection_nav] = !config.heater_active[_manual_selection_nav];
         if (_save_callback) _save_callback(config);
-      } else if (_standby_selection == 5) {
+      } else if (_manual_selection_nav == 5) {
         openSettings();
       }
       return true;
@@ -1099,7 +1099,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       if (_quick_edit_step == Q_EDIT_TARGET) _quick_edit_step = Q_EDIT_MAX;
       else {
         if (_save_callback) _save_callback(config);
-        _current_screen = SCREEN_STANDBY;
+        _current_screen = SCREEN_MANUAL;
       }
       return true;
     case SCREEN_QUICK_EDIT_AUTO:
@@ -1109,19 +1109,19 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
         _current_screen = SCREEN_AUTO_MODE;
       }
       return true;
-    case SCREEN_MANUAL_MODE:
+    case SCREEN_PRESET_MODE:
       {
-        int next_preset = _manual_confirmed_preset + 1;
+        int next_preset = _preset_confirmed_preset + 1;
         if (next_preset > 3) next_preset = 0;
-        _manual_selection = next_preset;
-        _manual_confirmed_preset = next_preset;
+        _preset_selection = next_preset;
+        _preset_confirmed_preset = next_preset;
         return true;
       }
-    case SCREEN_QUICK_EDIT_MANUAL:
+    case SCREEN_QUICK_EDIT_PRESET:
       if (_quick_edit_step == Q_EDIT_TARGET) _quick_edit_step = Q_EDIT_MAX;
       else {
         if (_save_callback) _save_callback(config);
-        _current_screen = SCREEN_MANUAL_MODE;
+        _current_screen = SCREEN_PRESET_MODE;
       }
       return true;
     case SCREEN_SETTINGS_PAGE_1:
@@ -1400,19 +1400,19 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
 
 bool UIManager::handleButtonHold(ConfigState& config) {
   if (_current_screen == SCREEN_SLEEP) {
-    _current_screen = SCREEN_STANDBY;
+    _current_screen = SCREEN_MANUAL;
     resetInactivityTimer();
     return true;
   }
-  if (_current_screen == SCREEN_MANUAL_MODE) {
-    enterQuickEditManual();
+  if (_current_screen == SCREEN_PRESET_MODE) {
+    enterQuickEditPreset();
     return true;
   }
   resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_SETTINGS_PAGE_1:
     case SCREEN_SETTINGS_PAGE_2:
-    case SCREEN_SETTINGS_PAGE_3: _current_screen = SCREEN_STANDBY; break;
+    case SCREEN_SETTINGS_PAGE_3: _current_screen = SCREEN_MANUAL; break;
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP:
     case SCREEN_SETTINGS_MAX_TEMP_LOCK:
       _current_screen = SCREEN_SETTINGS_PAGE_1;
@@ -1471,7 +1471,7 @@ bool UIManager::handleButtonHold(ConfigState& config) {
         strncpy(config.wifi_config.ssid, _char_entry_buffer, WIFI_SSID_MAX_LEN);
         config.wifi_config.ssid[WIFI_SSID_MAX_LEN] = '\0';
         config.wifi_config.use_custom = (strlen(config.wifi_config.ssid) > 0);
-        if (_save_callback) _save_callback(config);
+        if (_wifi_save_callback) _wifi_save_callback(config.wifi_config);
         _current_screen = SCREEN_SETTINGS_WIFI_MENU;
       }
       break;
@@ -1481,7 +1481,7 @@ bool UIManager::handleButtonHold(ConfigState& config) {
       } else {
         strncpy(config.wifi_config.password, _char_entry_buffer, WIFI_PASS_MAX_LEN);
         config.wifi_config.password[WIFI_PASS_MAX_LEN] = '\0';
-        if (_save_callback) _save_callback(config);
+        if (_wifi_save_callback) _wifi_save_callback(config.wifi_config);
         _current_screen = SCREEN_SETTINGS_WIFI_MENU;
       }
       break;
@@ -1494,7 +1494,7 @@ bool UIManager::handleButtonHold(ConfigState& config) {
 
 bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
   if (_current_screen == SCREEN_SLEEP) {
-    _current_screen = SCREEN_STANDBY;
+    _current_screen = SCREEN_MANUAL;
     resetInactivityTimer();
     return true;
   }
@@ -1509,12 +1509,12 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
   _menu_step_accumulator -= (float)change;
 
   switch (_current_screen) {
-    case SCREEN_STANDBY:
+    case SCREEN_MANUAL:
       {
-        int new_pos = _standby_selection + change;
+        int new_pos = _manual_selection_nav + change;
         if (new_pos < 0) new_pos = 0;
         if (new_pos >= 3) new_pos = 2;
-        _standby_selection = new_pos;
+        _manual_selection_nav = new_pos;
         break;
       }
     case SCREEN_AUTO_MODE:
@@ -1525,17 +1525,17 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         _auto_selection = new_pos;
         break;
       }
-    case SCREEN_MANUAL_MODE:
+    case SCREEN_PRESET_MODE:
       {
-        int new_pos = _manual_selection + change;
+        int new_pos = _preset_selection + change;
         if (new_pos < 0) new_pos = 0;
         if (new_pos > 3) new_pos = 3;
-        _manual_selection = new_pos;
+        _preset_selection = new_pos;
         break;
       }
     case SCREEN_QUICK_EDIT:
       {
-        int heaterIdx = _standby_selection;
+        int heaterIdx = _manual_selection_nav;
         if (_quick_edit_step == Q_EDIT_TARGET) {
           config.target_temps[heaterIdx] += (float)change * 0.5f;
           if (config.target_temps[heaterIdx] < 0) config.target_temps[heaterIdx] = 0;
@@ -1568,17 +1568,17 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         }
         break;
       }
-    case SCREEN_QUICK_EDIT_MANUAL:
+    case SCREEN_QUICK_EDIT_PRESET:
       {
-        int presetIdx = _manual_selection;
+        int presetIdx = _preset_selection;
         if (_quick_edit_step == Q_EDIT_TARGET) {
-          config.manual_target_temps[presetIdx] += (float)change * 0.5f;
-          if (config.manual_target_temps[presetIdx] < 0) config.manual_target_temps[presetIdx] = 0;
-          if (config.manual_target_temps[presetIdx] > config.max_temp_lock) config.manual_target_temps[presetIdx] = config.max_temp_lock;
+          config.preset_target_temps[presetIdx] += (float)change * 0.5f;
+          if (config.preset_target_temps[presetIdx] < 0) config.preset_target_temps[presetIdx] = 0;
+          if (config.preset_target_temps[presetIdx] > config.max_temp_lock) config.preset_target_temps[presetIdx] = config.max_temp_lock;
         } else {
-          config.manual_max_temps[presetIdx] += (float)change * 0.5f;
-          if (config.manual_max_temps[presetIdx] < config.manual_target_temps[presetIdx]) config.manual_max_temps[presetIdx] = config.manual_target_temps[presetIdx];
-          if (config.manual_max_temps[presetIdx] > config.max_temp_lock) config.manual_max_temps[presetIdx] = config.max_temp_lock;
+          config.preset_max_temps[presetIdx] += (float)change * 0.5f;
+          if (config.preset_max_temps[presetIdx] < config.preset_target_temps[presetIdx]) config.preset_max_temps[presetIdx] = config.preset_target_temps[presetIdx];
+          if (config.preset_max_temps[presetIdx] > config.max_temp_lock) config.preset_max_temps[presetIdx] = config.max_temp_lock;
         }
         break;
       }
@@ -1737,13 +1737,13 @@ uint16_t UIManager::getStatusColor(bool is_active, float current_temp, float tar
   return COLOR_ACTIVE;
 }
 
-// Draw Standby, Auto, Manual Screens implementations remain largely the same,
+// Draw Manual, Auto, Preset Screens implementations remain largely the same,
 // included below for completeness of the file structure.
 
-void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& config) {
+void UIManager::drawManualScreen(const AppState& state, const ConfigState& config) {
   drawTaskBar(); 
 
-  // --- สีใหม่สำหรับ Manual Mode ---
+  // --- สีสำหรับ Manual Mode ---
   // #09904B => color565(0x09, 0x90, 0x4B) = green accent for title/cursor
   uint16_t C_MANUAL_GREEN  = color565(0x09, 0x90, 0x4B);  // #09904B
   // #f2ffee => color565(0xF2, 0xFF, 0xEE) = light green card bg (OFF state)
@@ -1782,7 +1782,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
   _spr.unloadFont();
   
   _spr.loadFont(Arial18);
-  _spr.setTextColor(C_MANUAL_GREEN, title_bg);  // #09904B สำหรับคำว่า MANUAL
+  _spr.setTextColor(C_MANUAL_GREEN, title_bg);  // #09904B for MANUAL title
   _spr.drawString("MANUAL", title_x, title_y + 15); 
   _spr.unloadFont();
 
@@ -1798,11 +1798,11 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
 
   for (int i = 0; i < 3; i++) {
     int x = gap + (i * (card_w + gap));
-    bool is_selected = (i == _standby_selection && _show_cursor);
+    bool is_selected = (i == _manual_selection_nav && _show_cursor);
     bool is_active = config.heater_active[i];
     bool is_editing_this = (_current_screen == SCREEN_QUICK_EDIT && is_selected);
     
-    bool system_engaged = state.auto_running_background || state.manual_preset_running;
+    bool system_engaged = state.auto_running_background || state.preset_running;
     bool is_in_use = is_active && system_engaged;
 
     // สีพื้นกล่อง: active = ขาว, ไม่ active = #f2ffee (เขียวอ่อน)
@@ -1933,7 +1933,7 @@ void UIManager::drawStandbyScreen(const AppState& state, const ConfigState& conf
     else if (state.is_heating_active) { 
         if (state.heater_ready[i]) { status_txt = "READY"; status_col = 0x07E0; }
         else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
-    } else { status_txt = "STANDBY"; status_col = TFT_BLUE; }
+    } else { status_txt = "IDLE"; status_col = TFT_BLUE; }
 
     _spr.loadFont(Arial12); 
     int status_w = 6 + 5 + _spr.textWidth(status_txt); 
@@ -2026,8 +2026,8 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   int gap = 6;
   int card_w = (_spr.width() - (4 * gap)) / 3;
 
-  bool standbyUsingMain = state.manual_running_background && config.heater_active[0];
-  bool isOtherModeRunning = state.manual_preset_running || (standbyUsingMain && !state.auto_running_background);
+  bool standbyUsingMain = state.preset_running_background && config.heater_active[0];
+  bool isOtherModeRunning = state.preset_running || (standbyUsingMain && !state.auto_running_background);
   bool isLocked = state.heater_cutoff_state[0];
   bool globalRun = state.is_heating_active;
 
@@ -2116,12 +2116,12 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.unloadFont();
 
     // Status Row
-    const char* status_txt = "STANDBY";
+    const char* status_txt = "IDLE";
     uint16_t status_col = TFT_BLUE;
     if (state.tc_faults[0]) { status_txt = "H1 OFF"; status_col = TFT_RED; }
     else if (isOtherModeRunning) { status_txt = "IN-USE"; status_col = 0x7BEF; }
     else if (isLocked) { status_txt = "LOCK"; status_col = _blink_state ? TFT_RED : bg; }
-    else if (!is_active_step || !globalRun) { status_txt = "STANDBY"; status_col = TFT_BLUE; }
+    else if (!is_active_step || !globalRun) { status_txt = "IDLE"; status_col = TFT_BLUE; }
     else {
       if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
       else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
@@ -2161,7 +2161,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   }
 }
 
-void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& config) {
+void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& config) {
   drawTaskBar();
   int top_y = 24;
   int screen_h = _spr.height() - top_y;
@@ -2200,16 +2200,16 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   _spr.drawString("PRESET", 10, title_y + 15);
   _spr.unloadFont();
 
-  // Heater Temp (Right Side)
+  // Heater 1 Temp (Right Side)
   _spr.loadFont(Arial12);
   _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.setTextDatum(TR_DATUM);
-  _spr.drawString("OBJ TEMP", _spr.width() - 10, title_y + 2);
+  _spr.drawString("HEATER 1", _spr.width() - 10, title_y + 2);
   
   _spr.loadFont(Arial18);
   char buf[40];
-  if (isnan(state.ir_temps[0])) snprintf(buf, 40, "--- %c", unit_char);
-  else snprintf(buf, 40, "%.0f %c", convertTemp(state.ir_temps[0], state.temp_unit), unit_char);
+  if (isnan(state.tc_temps[0])) snprintf(buf, 40, "--- %c", unit_char);
+  else snprintf(buf, 40, "%.0f %c", convertTemp(state.tc_temps[0], state.temp_unit), unit_char);
   
   _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.drawString(buf, _spr.width() - 10, title_y + 18);
@@ -2221,17 +2221,17 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   int card_w = (_spr.width() - (3 * gap)) / 2;
   int card_h = 55; 
 
-  bool standbyUsingMain = state.manual_running_background && config.heater_active[0];
-  bool isOtherModeRunning = state.auto_running_background || (standbyUsingMain && !state.manual_preset_running);
+  bool standbyUsingMain = state.preset_running_background && config.heater_active[0];
+  bool isOtherModeRunning = state.auto_running_background || (standbyUsingMain && !state.preset_running);
   bool globalRun = state.is_heating_active;
 
   for (int i = 0; i < 4; i++) {
     int col = i % 2; int row = i / 2;
     int x = gap + (col * (card_w + gap)); int y = grid_y + (row * (card_h + gap));
-    bool isCursor = (_manual_selection == i && _show_cursor);
-    bool isConfirmed = (_manual_confirmed_preset == i);
-    bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_MANUAL && isCursor);
-    bool isThisPresetActive = (state.manual_preset_index == i && state.manual_preset_running);
+    bool isCursor = (_preset_selection == i && _show_cursor);
+    bool isConfirmed = (_preset_confirmed_preset == i);
+    bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_PRESET && isCursor);
+    bool isThisPresetActive = (state.preset_index == i && state.preset_running);
 
     // สีพื้นกล่อง: active/confirmed = #ecfdfd, อื่นๆ = ขาว
     uint16_t bg = (isConfirmed || isThisPresetActive) ? C_CARD_ACTIVE : TFT_WHITE;
@@ -2256,7 +2256,7 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
 
     // "SET" / "MAX" label — ใช้ built-in font เล็กลง 1 step
     const char* label_txt = "SET";
-    float val = (isEditingThis && _quick_edit_step == Q_EDIT_MAX) ? config.manual_max_temps[i] : config.manual_target_temps[i];
+    float val = (isEditingThis && _quick_edit_step == Q_EDIT_MAX) ? config.preset_max_temps[i] : config.preset_target_temps[i];
     if (isEditingThis && _quick_edit_step == Q_EDIT_MAX) label_txt = "MAX";
 
     _spr.unloadFont();
@@ -2265,13 +2265,13 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     _spr.setTextColor(isEditingThis ? C_PRESET_OLIVE : TFT_DARKGREY, bg);
     _spr.drawString(label_txt, x + 42, y + 5);
 
-    // --- ไล่สีอุณหภูมิอิงจาก manual_max_temps ---
+    // --- ไล่สีอุณหภูมิอิงจาก preset_max_temps ---
     uint16_t val_color;
     if (isEditingThis) {
       val_color = C_PRESET_OLIVE;
     } else {
-      float max_t = config.manual_max_temps[i];
-      float cur_set = config.manual_target_temps[i];
+      float max_t = config.preset_max_temps[i];
+      float cur_set = config.preset_target_temps[i];
       float ratio = (max_t > 0) ? (cur_set / max_t) : 0;
       if (ratio < 0) ratio = 0;
       
@@ -2308,9 +2308,9 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     else if (isThisPresetActive && globalRun) {
         if (state.heater_ready[0]) { p_status = "READY"; p_col = 0x07E0; }
         else { p_status = "HEATING"; p_col = TFT_ORANGE; }
-    } else if (state.manual_preset_running && globalRun && !isThisPresetActive) {
+    } else if (state.preset_running && globalRun && !isThisPresetActive) {
         p_status = "IN-USE"; p_col = 0x7BEF;
-    } else if (isConfirmed) { p_status = "STANDBY"; p_col = TFT_BLUE; }
+    } else if (isConfirmed) { p_status = "IDLE"; p_col = TFT_BLUE; }
 
     _spr.loadFont(Arial12); _spr.fillCircle(x + 45, y + 42, 3, p_col);
     _spr.setTextColor(p_col, bg); _spr.drawString(p_status, x + 53, y + 42);
@@ -2329,7 +2329,7 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
   const char* status_text = "---";
   uint16_t status_color = TFT_DARKGREY;
   
-  int activePresetIdx = (state.manual_preset_running && globalRun) ? state.manual_preset_index : -1;
+  int activePresetIdx = (state.preset_running && globalRun) ? state.preset_index : -1;
   bool isLocked = state.heater_cutoff_state[0];
   bool isReady = state.heater_ready[0];
 
@@ -2339,7 +2339,7 @@ void UIManager::drawManualModeScreen(const AppState& state, const ConfigState& c
     if (isLocked) { status_text = "Locked"; status_color = _blink_state ? TFT_RED : TFT_BLACK; }
     else if (isReady) { status_text = "Ready"; status_color = 0x07E0; }
     else { status_text = "Heating..."; status_color = TFT_ORANGE; }
-  } else if (_manual_confirmed_preset >= 0) { status_text = "Standby"; status_color = TFT_BLUE; }
+  } else if (_preset_confirmed_preset >= 0) { status_text = "Standby"; status_color = TFT_BLUE; }
 
   _spr.loadFont(Arial12);
   int txt_w = _spr.textWidth(status_text);
