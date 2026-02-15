@@ -128,6 +128,7 @@ struct AppState {
   uint8_t tc_faults[3];
   bool heater_cutoff_state[3];
   bool heater_ready[3];
+  bool is_wait_mode;
   uint8_t auto_step;
   bool auto_mode_enabled;        
   bool auto_running_background;  

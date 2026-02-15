@@ -1958,8 +1958,11 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
      
      _spr.loadFont(Arial18); 
      float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
+     bool show_dash = isnan(val);
+     if (i < 2 && val < 0) show_dash = true; 
+
      char vbuf[20];
-     if(isnan(val)) {
+     if(show_dash) {
          strcpy(vbuf, "---"); 
      } else {
          snprintf(vbuf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
@@ -2121,6 +2124,10 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     if (state.tc_faults[0]) { status_txt = "H1 OFF"; status_col = TFT_RED; }
     else if (isOtherModeRunning) { status_txt = "IN-USE"; status_col = 0x7BEF; }
     else if (isLocked) { status_txt = "LOCK"; status_col = _blink_state ? TFT_RED : bg; }
+    else if (state.is_wait_mode && is_active_step) { 
+        status_txt = "WAIT"; 
+        status_col = TFT_YELLOW; 
+    }
     else if (!is_active_step || !globalRun) { status_txt = "IDLE"; status_col = TFT_BLUE; }
     else {
       if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
@@ -2153,8 +2160,12 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
      _spr.drawString(labels[i], bx, btm_y + 4);
      _spr.loadFont(Arial18); 
      float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
-     if(isnan(val)) strcpy(buf, "---"); 
-     else snprintf(buf, 10, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     bool show_dash = isnan(val);
+     if (i < 2 && val < 0) show_dash = true; // ดักค่าลบ IR
+
+     char buf[32]; // เพิ่มขนาด buffer เผื่อไว้
+     if(show_dash) strcpy(buf, "---"); 
+     else snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
      
      _spr.drawString(buf, bx, btm_y + 22);
      _spr.unloadFont();
@@ -2354,14 +2365,30 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   int btm_y = _spr.height() - 48; 
   _spr.fillRoundRect(6, btm_y, _spr.width()-12, 42, 5, TFT_WHITE);
   const char* b_labels[] = {"IR1", "IR2", "TC Temp", "MAX(5s)"};
+  
   for(int i=0; i<4; i++) {
      int bx = 6 + (i * (_spr.width()-12)/4) + ((_spr.width()-12)/8);
-     _spr.loadFont(Arial12); _spr.setTextColor(TFT_BLACK, TFT_WHITE); _spr.setTextDatum(TC_DATUM);
+     
+     _spr.loadFont(Arial12); 
+     _spr.setTextColor(TFT_BLACK, TFT_WHITE); 
+     _spr.setTextDatum(TC_DATUM);
      _spr.drawString(b_labels[i], bx, btm_y + 4);
+     
      _spr.loadFont(Arial18); 
      float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
-     if(isnan(val)) strcpy(buf, "---"); else snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     
+     // +++ แก้ไขจุดนี้ครับ +++
+     bool show_dash = isnan(val);
+     if (i < 2 && val < 0) show_dash = true; // ดักค่าลบ IR
+
+     char buf[32];
+     if(show_dash) strcpy(buf, "---"); 
+     else snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     // ---------------------
+
      _spr.drawString(buf, bx, btm_y + 22);
+     // อย่าลืม unload font ถ้าในโค้ดเดิมมี (แต่ใน drawPresetModeScreen เดิมเหมือนจะ load/draw เลย แต่ใส่ไว้ปลอดภัยกว่า)
+     _spr.unloadFont(); 
   }
 }
 void UIManager::drawSettingsBrightness(const AppState& state) {

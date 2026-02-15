@@ -62,25 +62,24 @@
 #define AUTO_CONTROL_SENSOR 1
 
 // ========== [Auto Mode Cycle Detection Method] ==========
-// Define AUTO_USE_DIFFERENCE_MODE to use temperature-drop-based detection
-// instead of absolute threshold (< 40°C).
-// Useful for wide-FOV IR sensors (e.g. MLX90614ESF 90°) where ambient
-// reading stays above 40°C due to heater radiation in FOV.
+// Define AUTO_USE_DIFFERENCE_MODE to use temperature-drop-from-peak detection
+// instead of absolute threshold (< 40°C) for cycle transitions.
+// Useful for wide-FOV IR sensors (e.g. MLX90614ESF 90°) where IR reads
+// ~80-100°C from heater even without object present.
 #define AUTO_USE_DIFFERENCE_MODE
 
 #ifdef AUTO_USE_DIFFERENCE_MODE
   // Cycle transition: object removed when temp drops this much from peak
   #define AUTO_DROP_THRESHOLD    30.0f   // °C drop from peak_temp to trigger next cycle
-  // Safety: if IR reads within this margin of ambient for too long, no object is present  
-  #define AUTO_NO_OBJECT_MARGIN  10.0f   // °C above ambient = "no object"
-  // Safety: time (ms) IR must stay near ambient before auto-stop (no object)
-  #define AUTO_NO_OBJECT_TIMEOUT 30000   // 30 seconds
 #else
-  // Legacy absolute threshold mode
+  // Legacy absolute threshold mode  
+  // Cycle transition: object removed when temp drops below absolute value
   #define AUTO_ABS_THRESHOLD     40.0f   // °C absolute threshold for cycle change
-  #define AUTO_ABS_SAFETY_TEMP   40.0f   // °C absolute threshold for no-object safety
-  #define AUTO_ABS_SAFETY_MS     30000   // 30 seconds
 #endif
+
+// Safety: if temp stays dropped from peak for this long → auto-stop
+// DISABLED — PID now switches to TC1 when object removed, no stop needed.
+// #define AUTO_DROP_SAFETY_MS   30000   // 30 seconds sustained drop → safety stop
 
 // ========== [WiFi Configuration] ==========
 const char* ssid = "NNTT24";
@@ -187,6 +186,7 @@ struct SharedData {
   float ir_ambient[2];
   bool heater_cutoff[3];
   bool heater_ready[3];  // True if stable for 10s
+  bool object_removed_flag;
   uint8_t auto_step;     // 0=Off, 1=Cycle1, 2=Cycle2, 3=Cycle3
   bool auto_mode_enabled;
   bool auto_was_started;
@@ -587,11 +587,10 @@ void TaskHeater1Control(void* pvParameters) {
   float ready_stable_start = 0;
   float peak_temp = 0;
   bool has_reached_target = false;
+  bool object_removed = false;  // true = object lifted, PID uses TC1 to maintain heater temp
   uint32_t snapshot_timer = 0;
   float last_displayed_val = 0;
   bool prev_ready_state = false;
-
-  uint32_t auto_low_temp_timer = 0;
 
   for (;;) {
     float current_t = NAN;
@@ -651,7 +650,81 @@ void TaskHeater1Control(void* pvParameters) {
       target_t = config.auto_target_temps[cycle_idx];
       max_t = config.auto_max_temps[cycle_idx];
 #if AUTO_CONTROL_SENSOR == 1
+      // --- Auto mode sensor switching based on object presence ---
+      // Normal: PID uses IR1 to control object temperature
+      // Object removed (after READY): PID switches to TC1 to maintain heater temp
+      // Object placed back: PID switches back to IR1
+
+#ifdef AUTO_USE_DIFFERENCE_MODE
+      // [DIFFERENCE MODE] Detect object removed/replaced via drop from peak
+      if (has_reached_target && peak_temp > 0) {
+        float drop = peak_temp - ir1_temp;
+        float spike = ir1_temp - peak_temp;
+        bool is_removed_condition = (drop >= AUTO_DROP_THRESHOLD) || (spike >= 20.0f);
+
+        // -----------------------------------------------------------------------
+      // 1. ส่วนเช็คการ "วางวัตถุ" (Start Heating Condition)
+      // ทำงานเมื่อ: อยู่สถานะ Wait (object_removed) และยังไม่ถึงเป้า (Cycle ใหม่)
+      // เงื่อนไข: อุณหภูมิปัจจุบัน (ir1_temp) สูงกว่า ค่าฐาน (peak_temp) เกิน 10 องศา
+      // -----------------------------------------------------------------------
+      if (object_removed && !has_reached_target) {
+          // peak_temp ในบริบทนี้ คือค่าอุณหภูมิต่ำสุดที่เราจำไว้ตอนเริ่มเปลี่ยน Cycle
+          if (ir1_temp > peak_temp + 10.0f) { 
+              object_removed = false;     // ปลด Wait -> เริ่ม HEATING
+              peak_temp = 0;              // รีเซ็ตค่าเพื่อไปรอใช้ตอน Ready รอบหน้า
+              
+              // Reset PID state
+              pid_integral[HEATER_IDX] = 0;
+              pid_prev_error[HEATER_IDX] = 0;
+              pid_last_time[HEATER_IDX] = 0;
+              
+              Serial.printf("[AUTO] Object Placed Detected (Rise > 10C): Start Heating\n");
+          }
+      }
+
+      // -----------------------------------------------------------------------
+      // 2. ส่วนเช็คการ "ยกวัตถุออก" (Stop Heating Condition)
+      // ทำงานเมื่อ: ถึงเป้าหมายแล้ว (Ready) และจำค่า Peak ได้แล้ว
+      // -----------------------------------------------------------------------
+      if (has_reached_target && peak_temp > 0) {
+        float drop = peak_temp - ir1_temp;
+        float spike = ir1_temp - peak_temp; 
+        
+        // เงื่อนไขยกออก: อุณหภูมิตก (Drop) หรือ พุ่งสูงผิดปกติ (Spike เห็นหน้าเตา)
+        bool is_removed_condition = (drop >= AUTO_DROP_THRESHOLD) || (spike >= 20.0f);
+
+        if (!object_removed && !isnan(ir1_temp) && is_removed_condition) {
+          // Object removed -> เข้าสถานะ WAIT
+          object_removed = true;
+          
+          // Reset PID
+          pid_integral[HEATER_IDX] = 0;
+          pid_prev_error[HEATER_IDX] = 0;
+          pid_last_time[HEATER_IDX] = 0;
+          
+          Serial.printf("[AUTO] Object removed: IR=%.0f peak=%.0f (Drop=%.0f, Spike=%.0f) -> WAIT\n",
+            ir1_temp, peak_temp, drop, spike);
+        }
+        
+        // หมายเหตุ: เราลบ else if (Object placed back) ตรงนี้ออก 
+        // เพราะเราย้ายไปเช็คแบบ Rise Logic ด้านบนแทนแล้ว
+      }
+
+      if (object_removed) {
+        // current_t = sysState.tc_temps[HEATER_IDX];
+        // max_t = config.max_temp_lock;
+        is_active = false;           
+        pid_integral[HEATER_IDX] = 0; 
+      } else {
+        // Normal: use IR1 for object temperature control
+        current_t = ir1_temp;
+      }
+#else
+      // [ABSOLUTE MODE] Original — always use IR1
+      // current_t = ir1_temp;
       current_t = ir1_temp;
+#endif
+
 #endif
     }
     // 2. PRESET MODE (only Heater 1)
@@ -703,7 +776,7 @@ void TaskHeater1Control(void* pvParameters) {
     bool is_ready_status = false;
 
     if (has_go_to && is_active && !isnan(current_t)) {
-      if (current_t >= max_t) {
+      if (!auto_is_running && current_t >= max_t) { 
         cutoff_active = true;
         output_percent = 0.0f;
         pid_integral[HEATER_IDX] = 0;
@@ -756,6 +829,8 @@ void TaskHeater1Control(void* pvParameters) {
     }
 
     // === AUTO MODE CYCLE TRANSITION (only Heater 1) ===
+    // Cycle changes when object is removed after READY (object_removed flag set above).
+    // The sensor switching (IR1 ↔ TC1) is handled in the auto mode override block.
     if (auto_is_running && has_go_to) {
 #if AUTO_CONTROL_SENSOR == 1
       float control_temp = ir1_temp;
@@ -763,25 +838,14 @@ void TaskHeater1Control(void* pvParameters) {
       float control_temp = sysState.tc_temps[HEATER_IDX];
 #endif
       if (!isnan(control_temp)) {
+        // Track peak temperature after READY
         if (is_ready_status) {
           has_reached_target = true;
           if (control_temp > peak_temp) peak_temp = control_temp;
         }
 
-#ifdef AUTO_USE_DIFFERENCE_MODE
-        // [DIFFERENCE MODE] Object removed = temp dropped significantly from peak
-        // Works with wide-FOV IR (90°) where ambient stays above 40°C
-        bool object_removed = has_reached_target 
-                              && (peak_temp > 0) 
-                              && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
-#else
-        // [ABSOLUTE MODE] Object removed = temp dropped below absolute threshold
-        // Original logic — works when IR reads near ambient (~25°C) after object removed
-        // bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
-        bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
-#endif
-
-        if (object_removed) {
+        // Cycle transition: object was just removed (detected in sensor switch block)
+        if (object_removed && has_reached_target) {
           if (millis() - cycle_change_debounce > 1000) {
             if (current_auto_step < 3) {
               current_auto_step++;
@@ -792,9 +856,14 @@ void TaskHeater1Control(void* pvParameters) {
               sysState.auto_step = current_auto_step;
               xSemaphoreGive(dataMutex);
             }
-            peak_temp = 0;
-            has_reached_target = false;
+            // Don't reset peak/has_reached here — sensor switch block handles it
+            // when object is placed back
+            
+            has_reached_target = false; // รีเซ็ตสถานะ Ready เพื่อเริ่ม Cycle ใหม่
+            peak_temp = control_temp;
+            
             cycle_change_debounce = millis();
+            Serial.printf("[AUTO] Cycle → %d\n", current_auto_step);
           }
         }
       }
@@ -809,77 +878,23 @@ void TaskHeater1Control(void* pvParameters) {
       }
       peak_temp = 0;
       has_reached_target = false;
+      object_removed = false;
       cycle_change_debounce = 0;
-      auto_low_temp_timer = 0;
     }
 
-    // === AUTO MODE SAFETY: No-object detection ===
-    // If heater is running but no object is present for extended time → auto-stop
-    if (auto_is_running && has_go_to) {
-
-#ifdef AUTO_USE_DIFFERENCE_MODE
-      // [DIFFERENCE MODE] No object = IR reads within margin of ambient temp
-      // Wide-FOV IR (90°) picks up heater radiation, so ambient alone may read >40°C.
-      // Instead, check if (ir_object - ir_ambient) is small → no object on heater.
-      bool no_object = false;
-      if (!isnan(ir1_temp) && !isnan(ir1_ambient)) {
-        float ir_diff = ir1_temp - ir1_ambient;
-        no_object = (ir_diff < AUTO_NO_OBJECT_MARGIN);
-      }
-      if (no_object) {
-        if (auto_low_temp_timer == 0) {
-          auto_low_temp_timer = millis();
-        }
-        else if (millis() - auto_low_temp_timer > AUTO_NO_OBJECT_TIMEOUT) {
-          // No object detected for too long → stop
-          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            has_go_to = false;
-            sysState.auto_was_started = false;
-            sysState.auto_step = 0;
-            sysState.preset_was_started = false;
-            sysState.preset_running = false;
-            xSemaphoreGive(dataMutex);
-          }
-          beep_mode = 3;
-          beep_queue = 4;
-          auto_low_temp_timer = 0;
-        }
-      } else {
-        // Object present (IR - ambient >= margin) → reset timer
-        auto_low_temp_timer = 0;
-      }
-#else
-      // [ABSOLUTE MODE] No object = IR reads below absolute threshold
-      // Original logic — works when IR reads near room temp (~25°C) after object removed
-      // if (!isnan(ir1_temp) && ir1_temp < 40.0f) { ... }
-      if (!isnan(ir1_temp) && ir1_temp < AUTO_ABS_SAFETY_TEMP) {
-        if (auto_low_temp_timer == 0) {
-          auto_low_temp_timer = millis(); 
-        } 
-        else if (millis() - auto_low_temp_timer > AUTO_ABS_SAFETY_MS) {
-          // สั่ง Stop การทำงาน
-          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            has_go_to = false;               
-            sysState.auto_was_started = false; 
-            sysState.auto_step = 0;        
-            sysState.preset_was_started = false;
-            sysState.preset_running = false;
-            xSemaphoreGive(dataMutex);
-          }
-          beep_mode = 3; 
-          beep_queue = 4; 
-          auto_low_temp_timer = 0; 
-        }
-      } else {
-        // ถ้าอุณหภูมิเกิน threshold หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
-        auto_low_temp_timer = 0; 
-      }
-#endif
-
-    } else {
-      // ถ้าไม่ได้รัน Auto ก็รีเซ็ตเวลาทิ้ง
-      auto_low_temp_timer = 0;
-    }
+    // === AUTO MODE SAFETY ===
+    // No safety stop needed — when object is removed, PID switches to TC1 and
+    // maintains heater temperature. When object is placed back, PID switches
+    // back to IR1 and continues heating to target.
+    //
+    // Previous safety approaches (commented out for reference):
+    // --- [ABSOLUTE MODE - Original] ---
+    // if (auto_is_running && ir1_temp < 40.0f for 30s) → stop
+    // --- [Drop-from-peak 30s] ---
+    // if (peak - ir > 30°C for 30s) → stop
+    // --- [IR - Ambient difference] ---
+    // if ((ir - ambient) < 10°C for 30s) → stop
+    // All unreliable with wide-FOV IR (MLX90614ESF 90°) seeing heater radiation.
 
     // === Display Freeze Logic ===
     float tc_temp = NAN;
@@ -904,6 +919,7 @@ void TaskHeater1Control(void* pvParameters) {
       sysState.heater_ready[HEATER_IDX] = is_ready_status;
       sysState.displayed_temps[HEATER_IDX] = val_to_display;
       sysState.auto_step = current_auto_step;
+      sysState.object_removed_flag = object_removed;
       xSemaphoreGive(dataMutex);
     }
 
@@ -1450,6 +1466,7 @@ void TaskDisplay(void* pvParameters) {
         st.heater_ready[i] = sysState.heater_ready[i];
       }
       st.auto_step = sysState.auto_step;
+      st.is_wait_mode = sysState.object_removed_flag;
       st.auto_mode_enabled = sysState.auto_mode_enabled;
       st.auto_running_background = (has_go_to && sysState.auto_was_started && sysState.auto_step > 0);
       st.preset_running_background = (has_go_to && sysState.preset_was_started);
@@ -2506,15 +2523,33 @@ int getWiFiSignalStrength() {
 
 // ========== [Hardware Helper Functions] ==========
 float applyEmissivity(float t_obj_sensor, float t_amb, float emissivity, float sensor_emissivity) {
+  // 1. เช็คว่าค่าดิบเสีย (NAN) หรือไม่
   if (isnan(t_obj_sensor) || isnan(t_amb)) return NAN;
-  if (fabs(emissivity - sensor_emissivity) < 0.01f) return t_obj_sensor;
 
-  float Tk_obj = t_obj_sensor + 273.15f;
-  float Tk_amb = t_amb + 273.15f;
-  float Tk_true_4 = pow(Tk_amb, 4) + (pow(Tk_obj, 4) - pow(Tk_amb, 4)) * (sensor_emissivity / emissivity);
+  float final_temp = 0.0f;
 
-  float Tk_real = pow(Tk_true_4, 0.25f);
-  return Tk_real - 273.15f;
+  // 2. คำนวณค่าอุณหภูมิ
+  if (fabs(emissivity - sensor_emissivity) < 0.01f) {
+    final_temp = t_obj_sensor;
+  } else {
+    float Tk_obj = t_obj_sensor + 273.15f;
+    float Tk_amb = t_amb + 273.15f;
+    float Tk_true_4 = pow(Tk_amb, 4) + (pow(Tk_obj, 4) - pow(Tk_amb, 4)) * (sensor_emissivity / emissivity);
+
+    float Tk_real = 0;
+    if (Tk_true_4 >= 0) {
+        Tk_real = pow(Tk_true_4, 0.25f);
+    } else {
+        // ถอดรากที่ค่า Absolute แล้วใส่เครื่องหมายลบกลับเข้าไป
+        Tk_real = -pow(-Tk_true_4, 0.25f); 
+    }
+
+    final_temp = Tk_real - 273.15f;
+  }
+
+ 
+
+  return final_temp;
 }
 
 void IRAM_ATTR tpo_isr() {
