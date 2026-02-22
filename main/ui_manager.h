@@ -182,6 +182,7 @@ public:
 private:
   TFT_eSPI* _tft;
   TFT_eSprite _spr;
+  bool _bg_dirty;                // Force background redraw on next frame
   UIScreen _current_screen;
   UIScreen _previous_screen;
   QuickEditStep _quick_edit_step;
@@ -248,6 +249,10 @@ private:
   void drawBootScreen();
   void drawTaskBar();
   void drawHeader(const char* title); 
+
+  void invalidateBackground();  // Call to force background redraw on next frame
+  bool needsBackgroundRedraw(); // Returns true if background needs redrawing
+  void drawBackground();        // Draws background into _spr (gradient from LUT or solid fill)
 
   uint16_t getStatusColor(bool is_active, float current_temp, float target_temp);
   float convertTemp(float temp_c, char unit);

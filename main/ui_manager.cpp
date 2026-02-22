@@ -153,6 +153,7 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback, WiFiSaveCa
   : _tft(tft), _spr(_tft), _save_callback(save_callback), _wifi_save_callback(wifi_save_callback) {
   _current_screen = SCREEN_BOOT;
   _previous_screen = SCREEN_MANUAL;
+  _bg_dirty = true;
   _quick_edit_step = Q_EDIT_TARGET;
   _blink_state = false;
   _is_editing_calibration = false;
@@ -182,12 +183,133 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback, WiFiSaveCa
 void UIManager::begin() {
   _spr.createSprite(_tft->width(), _tft->height());
   _spr.setSwapBytes(true);
+  _bg_dirty = true;
   _last_activity_time = millis();
   _boot_start_time = millis();
 }
 
 uint16_t UIManager::color565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+void UIManager::invalidateBackground() {
+  _bg_dirty = true;
+}
+
+bool UIManager::needsBackgroundRedraw() {
+  return _bg_dirty;
+}
+
+// Pre-computed gradient lookup table (one uint16_t color per row below taskbar)
+// Stored in _gradient_lut[], recomputed only on screen change
+#define GRADIENT_LUT_MAX 280  // Max screen height (adjust if needed)
+static uint16_t _gradient_lut[GRADIENT_LUT_MAX];
+static int _gradient_lut_len = 0;
+static UIScreen _gradient_lut_screen = (UIScreen)255;
+
+// Helper: fill gradient LUT for a given bottom color
+static void computeGradientLUT(uint16_t* lut, int len, uint8_t bot_r, uint8_t bot_g, uint8_t bot_b) {
+  for (int row = 0; row < len; row++) {
+    float t = (float)row / (float)(len - 1);
+    uint8_t r = 255 - (uint8_t)(t * (255 - bot_r));
+    uint8_t g = 255 - (uint8_t)(t * (255 - bot_g));
+    uint8_t b = 255 - (uint8_t)(t * (255 - bot_b));
+    lut[row] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+  }
+}
+
+// Draw gradient from LUT (no float math per frame, recomputes only when color changes)
+static uint8_t _lut_cr = 0, _lut_cg = 0, _lut_cb = 0;
+static void drawGradientFromLUT(TFT_eSprite* spr, int top_y, int screen_w, int screen_h,
+                                 uint8_t bot_r, uint8_t bot_g, uint8_t bot_b) {
+  int len = (screen_h < GRADIENT_LUT_MAX) ? screen_h : GRADIENT_LUT_MAX;
+  // Recompute only if gradient parameters changed
+  if (_gradient_lut_len != len || _lut_cr != bot_r || _lut_cg != bot_g || _lut_cb != bot_b) {
+    computeGradientLUT(_gradient_lut, len, bot_r, bot_g, bot_b);
+    _gradient_lut_len = len;
+    _lut_cr = bot_r; _lut_cg = bot_g; _lut_cb = bot_b;
+  }
+  for (int row = 0; row < _gradient_lut_len; row++) {
+    spr->drawFastHLine(0, top_y + row, screen_w, _gradient_lut[row]);
+  }
+}
+
+// Helper: Determine which "background group" the current screen belongs to
+static int getBackgroundGroup(UIScreen screen) {
+  switch (screen) {
+    case SCREEN_MANUAL:
+    case SCREEN_QUICK_EDIT:
+      return 1;
+    case SCREEN_AUTO_MODE:
+    case SCREEN_QUICK_EDIT_AUTO:
+      return 2;
+    case SCREEN_PRESET_MODE:
+    case SCREEN_QUICK_EDIT_PRESET:
+      return 3;
+    case SCREEN_BOOT:
+      return 4;
+    case SCREEN_SLEEP:
+      return 5;
+    default:
+      return 10; // Settings screens
+  }
+}
+
+// Draw background from LUT (fast) or solid fill depending on screen type
+void UIManager::drawBackground() {
+  int top_y = 24;
+  int screen_h = _spr.height() - top_y;
+  int screen_w = _spr.width();
+  int group = getBackgroundGroup(_current_screen);
+
+  // Recompute LUT only if screen group changed
+  if (_bg_dirty || _gradient_lut_screen != _current_screen) {
+    int old_group = getBackgroundGroup(_gradient_lut_screen);
+    int new_group = group;
+    
+    if (old_group != new_group || _bg_dirty) {
+      _gradient_lut_len = (screen_h < GRADIENT_LUT_MAX) ? screen_h : GRADIENT_LUT_MAX;
+      
+      switch (group) {
+        case 1: // Manual: white -> #4A9A40
+          computeGradientLUT(_gradient_lut, _gradient_lut_len, 0x4A, 0x9A, 0x40);
+          break;
+        case 2: // Auto: white -> #9C99CA
+          computeGradientLUT(_gradient_lut, _gradient_lut_len, 0x9C, 0x99, 0xCA);
+          break;
+        case 3: // Preset: white -> #CDCD06
+          computeGradientLUT(_gradient_lut, _gradient_lut_len, 0xCD, 0xCD, 0x06);
+          break;
+        default:
+          _gradient_lut_len = 0; // No gradient needed
+          break;
+      }
+    }
+    _gradient_lut_screen = _current_screen;
+    _bg_dirty = false;
+  }
+
+  // Now draw background into _spr
+  switch (group) {
+    case 1: // Manual
+    case 2: // Auto
+    case 3: // Preset
+      _spr.fillRect(0, 0, screen_w, top_y, C_BLACK); // taskbar area
+      for (int row = 0; row < _gradient_lut_len; row++) {
+        _spr.drawFastHLine(0, top_y + row, screen_w, _gradient_lut[row]);
+      }
+      break;
+    case 4: // Boot
+      _spr.fillSprite(0x3245);
+      break;
+    case 5: // Sleep
+      _spr.fillSprite(C_SET_BG);
+      break;
+    default: // Settings
+      _spr.fillRect(0, 0, screen_w, top_y, C_BLACK);
+      _spr.fillRect(0, top_y, screen_w, screen_h, C_SET_BG);
+      break;
+  }
 }
 
 void UIManager::openSettings() {
@@ -400,7 +522,7 @@ void UIManager::drawTaskBar() {
 
 void UIManager::drawHeader(const char* title) {
   drawTaskBar();
-  // Light background below taskbar (matches auto/preset/manual)
+  // Light background below taskbar
   int top_y = 24;
   _spr.fillRect(0, top_y, _spr.width(), _spr.height() - top_y, C_SET_BG);
   
@@ -1756,13 +1878,7 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
   int screen_w = _spr.width();
 
   // --- Background gradient: white (top) -> #4A9A40 (bottom, darker green) ---
-  for (int row = 0; row < screen_h; row++) {
-    float t = (float)row / (float)(screen_h - 1);
-    uint8_t r = 255 - (uint8_t)(t * (255 - 0x4A));
-    uint8_t g = 255 - (uint8_t)(t * (255 - 0x9A));
-    uint8_t b = 255 - (uint8_t)(t * (255 - 0x40));
-    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
-  }
+  drawGradientFromLUT(&_spr, top_y, screen_w, screen_h, 0x4A, 0x9A, 0x40);
 
   // --- Title Section ---
   int title_x = 10;
@@ -1984,13 +2100,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   // gradient bottom: #9C99CA
   
   // --- Background gradient: white (top) -> #9C99CA (bottom) ---
-  for (int row = 0; row < screen_h; row++) {
-    float t = (float)row / (float)(screen_h - 1);
-    uint8_t r = 255 - (uint8_t)(t * (255 - 0x9C));
-    uint8_t g = 255 - (uint8_t)(t * (255 - 0x99));
-    uint8_t b = 255 - (uint8_t)(t * (255 - 0xCA));
-    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
-  }
+  drawGradientFromLUT(&_spr, top_y, screen_w, screen_h, 0x9C, 0x99, 0xCA);
 
   // เตรียมหน่วยอุณหภูมิ
   char unit_char = (state.temp_unit == 'c' || state.temp_unit == 'C') ? 'C' : 'F';
@@ -2184,13 +2294,7 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   // gradient bottom: #CDCD06
 
   // --- Background gradient: white (top) -> #CDCD06 (bottom) ---
-  for (int row = 0; row < screen_h; row++) {
-    float t = (float)row / (float)(screen_h - 1);
-    uint8_t r = 255 - (uint8_t)(t * (255 - 0xCD));
-    uint8_t g = 255 - (uint8_t)(t * (255 - 0xCD));
-    uint8_t b = 255 - (uint8_t)(t * (255 - 0x06));
-    _spr.drawFastHLine(0, top_y + row, screen_w, color565(r, g, b));
-  }
+  drawGradientFromLUT(&_spr, top_y, screen_w, screen_h, 0xCD, 0xCD, 0x06);
 
   char unit_char = (state.temp_unit == 'c' || state.temp_unit == 'C') ? 'C' : 'F';
 

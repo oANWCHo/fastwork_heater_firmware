@@ -19,10 +19,10 @@
 #include "Adafruit_ILI9341.h"
 
 // For the Adafruit shield, these are the default.
-#define TFT_DC 26
-#define TFT_CS 15
-#define TFT_MOSI 13
-#define TFT_MISO 12
+#define TFT_DC 9
+#define TFT_CS 10
+#define TFT_MOSI 47
+#define TFT_MISO 48
 #define TFT_CLK 14
 #define TFT_RST 27
 // Use hardware SPI (on Uno, #13, #12, #11) and the above for CS/DC

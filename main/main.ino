@@ -40,8 +40,13 @@
 #define SCL_PIN 5
 #define BUZZER 41
 #define BUZZER_CHANNEL 2  // ใช้ Channel 2 (จะได้ไม่ชนกับ Backlight ที่มักใช้ 0 หรือ 1)
-#define BUZZER_FREQ 2700
-#define BUZZER_RES 8  // ความละเอียด 8-bit
+#define BUZZER_FREQ 2000  // ความถี่ Buzzer (Hz) — ปรับได้: 1000=ต่ำทึ่บ, 2000=กลาง, 4000=แหลม
+#define BUZZER_RES 8      // ความละเอียด 8-bit
+
+// Backlight PWM
+#define TFT_BL_CHANNEL 0  // LEDC channel สำหรับ Backlight (ต้องไม่ซ้ำกับ BUZZER_CHANNEL)
+#define TFT_BL_FREQ    5000  // ความถี่ PWM Backlight (Hz)
+#define TFT_BL_RES     8     // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
 #define PCF_INT 21
 
@@ -90,8 +95,10 @@
 // #define AUTO_DROP_SAFETY_MS   30000   // 30 seconds sustained drop → safety stop
 
 // ========== [WiFi Configuration] ==========
-const char* ssid = "NNTT24";
-const char* password = "TeraE-01";
+// const char* ssid = "NNTT24";
+// const char* password = "TeraE-01";
+const char* ssid = "SR803_5G";
+const char* password = "80323SM5F";
 
 // WiFi Status - For UI
 enum WiFiConnectionStatus {
@@ -1708,8 +1715,9 @@ void setup() {
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
   pinMode(ENCODER_SW, INPUT_PULLUP);
-  pinMode(TFT_BL, OUTPUT);
-  digitalWrite(TFT_BL, HIGH);
+
+  // Init Backlight PWM ด้วย LEDC (ต้องทำก่อน setBrightness)
+  ledcAttach(TFT_BL, TFT_BL_FREQ, TFT_BL_RES);
 
   max31855_init_pins();
   setup_encoder_fixed();
@@ -1723,7 +1731,7 @@ void setup() {
   setBrightness(config.brightness);
 
   tft.init();
-  tft.setRotation(3);
+  tft.setRotation(1);  // กลับหัว 180° จากเดิม (3→1)
   tft.fillScreen(TFT_BLACK);
   ui.begin();
   ui.setWiFiReconnectCallback(triggerWiFiReconnect);
@@ -2616,7 +2624,7 @@ void setup_encoder_fixed() {
 
 void setBrightness(uint8_t val) {
   int duty = map(val, 0, 100, 0, 255);
-  analogWrite(TFT_BL, duty);
+  ledcWrite(TFT_BL, duty);  // ใช้ ledcWrite (attach ทำไว้ใน setup แล้ว)
 }
 
 void read_hardware_encoder(float* delta_out) {
