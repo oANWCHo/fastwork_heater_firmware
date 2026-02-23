@@ -30,7 +30,7 @@
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
 #define MAXCS4 18  // CS4
-#define TFT_BL 38
+#define TFT_BL 40
 
 #define ENCODER_A 6
 #define ENCODER_B 7
@@ -45,7 +45,7 @@
 
 // Backlight PWM
 #define TFT_BL_CHANNEL 0  // LEDC channel สำหรับ Backlight (ต้องไม่ซ้ำกับ BUZZER_CHANNEL)
-#define TFT_BL_FREQ    5000  // ความถี่ PWM Backlight (Hz)
+#define TFT_BL_FREQ    2000  // ความถี่ PWM Backlight (Hz)
 #define TFT_BL_RES     8     // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
 #define PCF_INT 21
@@ -368,7 +368,8 @@ void TaskWiFiManager(void* pvParameters) {
           wifiStatus = WIFI_STATUS_CONNECTING;
           WiFi.disconnect();
           vTaskDelay(pdMS_TO_TICKS(100));
-          WiFi.begin(ssid, password);
+          // WiFi.begin(ssid, password);
+          WiFi.begin(getWiFiSSID(), getWiFiPassword());
           lastReconnectAttempt = millis();
         }
         break;
