@@ -22,8 +22,6 @@
 #include <ElegantOTA.h>
 
 // ========== [Pin Definitions] ==========
-#define SWAP_IR 1 //1 = swap
-
 #define MAXDO 48   // MISO
 #define MAXCLK 47  // SCK
 #define MAXCS1 15  // CS1
@@ -50,14 +48,8 @@
 #define PCF_ADDR 0x20
 #define PCF_INT 21
 
-#ifdef SWAP_IR
-  #define IR1_ADDR 0x11
-  #define IR2_ADDR 0x10
-#else
-  #define IR1_ADDR 0x10
-  #define IR2_ADDR 0x11
-#endif 
-
+#define IR1_ADDR 0x10
+#define IR2_ADDR 0x11
 #define SSR_PIN1 42
 #define SSR_PIN2 2
 #define SSR_PIN3 1
@@ -697,7 +689,6 @@ void TaskHeater1Control(void* pvParameters) {
               Serial.printf("[AUTO] Object Placed Detected (Rise > 10C): Start Heating\n");
           }
       }
-      }  // <<< closes if (has_reached_target && peak_temp > 0) from line 660
 
       // -----------------------------------------------------------------------
       // 2. ส่วนเช็คการ "ยกวัตถุออก" (Stop Heating Condition)
