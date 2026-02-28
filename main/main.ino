@@ -23,12 +23,12 @@
 
 // ========== [Pin Definitions] ==========
 #define MAXDO 48   // MISO
-#define MAXCLK 47  // SCK
+#define MAXCLK 14 // SCK
 #define MAXCS1 15  // CS1
 #define MAXCS2 16  // CS2
 #define MAXCS3 17  // CS3
 #define MAXCS4 18  // CS4
-#define TFT_BL 38
+#define TFT_BL 40
 
 #define ENCODER_A 6
 #define ENCODER_B 7
@@ -38,7 +38,7 @@
 #define SCL_PIN 5
 #define BUZZER 41
 #define BUZZER_CHANNEL 2  // ใช้ Channel 2 (จะได้ไม่ชนกับ Backlight ที่มักใช้ 0 หรือ 1)
-#define BUZZER_FREQ 2700
+#define BUZZER_FREQ 4000
 #define BUZZER_RES 8  // ความละเอียด 8-bit
 #define PCF_ADDR 0x20
 #define PCF_INT 21
@@ -1540,9 +1540,71 @@ void TaskDebug(void* pvParameters) {
 }
 
 // 7. SOUND TASK
-void TaskSound(void* pvParameters) {
-  ledcAttach(BUZZER, BUZZER_FREQ, BUZZER_RES);
+// Passive Piezo Buzzer: ปรับความดังด้วยการเลื่อน frequency ออกจาก resonant point
+// - ดังสุด (100%) = ตรง resonant 4kHz, duty 50%
+// - เบาลง = เลื่อน freq ออกจาก resonant (detune)
+// - ปิดเสียง = duty 0
+//
+// หลักการ: Piezo ดังสุดที่ resonant frequency
+//           ยิ่ง freq ห่างจาก resonant ยิ่งเบา
+//           duty cycle ควรคงที่ที่ 50% (128/255) เพื่อ max amplitude
 
+static uint32_t buzzer_get_freq(int volume_percent) {
+  // volume 100% → 4000Hz (resonant = ดังสุด)
+  // volume  50% → ~3000Hz (เบาลงมาก)
+  // volume  25% → ~2500Hz (เบามาก)
+  // volume  10% → ~2000Hz (แทบไม่ได้ยิน)
+  if (volume_percent >= 100) return BUZZER_FREQ;       // 4000Hz resonant
+  if (volume_percent <= 0)   return BUZZER_FREQ;       // จะถูกปิดด้วย duty=0 อยู่แล้ว
+  
+  // Detune: เลื่อน freq ลงจาก 4000Hz → 1500Hz ตาม volume
+  // ที่ volume 100 → offset=0, ที่ volume 1 → offset=2500
+  uint32_t max_detune = 2500;  // Hz ห่างจาก resonant สูงสุด
+  uint32_t detune = max_detune * (100 - volume_percent) / 100;
+  return BUZZER_FREQ - detune;  // 4000 → 1500
+}
+
+// void TaskSound(void* pvParameters) {
+//   ledcAttach(BUZZER, BUZZER_FREQ, BUZZER_RES);
+
+//   for (;;) {
+//     if (beep_queue > 0) {
+//       int on_time = 60;
+//       int off_time = 100;
+
+//       if (beep_mode == 1) {
+//         on_time = 250;
+//         off_time = 250;
+//       } else if (beep_mode == 3) {
+//         on_time = 3000;
+//         off_time = 100;
+//       }
+
+//       // --- ขับเสียง Passive Piezo ด้วย frequency detuning ---
+//       if (config.sound_volume > 0) {
+//         uint32_t freq = buzzer_get_freq(config.sound_volume);
+//         ledcChangeFrequency(BUZZER, freq, BUZZER_RES);
+//         ledcWrite(BUZZER, 128);  // duty 50% เสมอ = amplitude สูงสุดที่ freq นั้น
+//       } else {
+//         ledcWrite(BUZZER, 0);
+//       }
+
+//       vTaskDelay(pdMS_TO_TICKS(on_time));
+
+//       ledcWrite(BUZZER, 0);  // ปิดเสียง
+//       vTaskDelay(pdMS_TO_TICKS(off_time));
+
+//       if (beep_queue >= 2) beep_queue -= 2;
+//       else beep_queue = 0;
+
+//       if (beep_queue == 0) beep_mode = 0;
+//     } else {
+//       ledcWrite(BUZZER, 0);  // เงียบเมื่อไม่มีคิว
+//       vTaskDelay(pdMS_TO_TICKS(100));
+//     }
+//   }
+// }
+void TaskSound(void* pvParameters) {
   for (;;) {
     if (beep_queue > 0) {
       int on_time = 60;
@@ -1556,19 +1618,23 @@ void TaskSound(void* pvParameters) {
         off_time = 100;
       }
 
-      // --- ขับเสียงด้วย PWM (API v3.0+) ---
+      // ใช้คำสั่ง tone() แทน ledc 
       if (config.sound_volume > 0) {
-        int duty = map(config.sound_volume, 0, 100, 0, 128);
-
-        // แก้ไข: ส่งค่าไปที่ขา BUZZER โดยตรง (ไม่ต้องใส่ Channel แล้ว)
-        ledcWrite(BUZZER, duty);
+        // อิงจากการ detune ความถี่ในโค้ดเดิมของคุณเพื่อลดระดับเสียง
+        uint32_t freq = 4000;
+        if (config.sound_volume < 100) {
+           freq = 4000 - (2500 * (100 - config.sound_volume) / 100);
+        }
+        
+        // **ทดลองเปลี่ยน 4000 เป็น 2000 หรือ 1000 หากเสียงยังดังแต๊กๆ 
+        // เพราะความถี่ต่ำจะกินกระแสชั่วขณะน้อยกว่า อาจจะพอดังได้บ้างเมื่อต่อตรงกับ ESP32**
+        tone(BUZZER, freq); 
       } else {
-        ledcWrite(BUZZER, 0);
+        noTone(BUZZER); // ปิดเสียง (Mute)
       }
 
       vTaskDelay(pdMS_TO_TICKS(on_time));
-
-      ledcWrite(BUZZER, 0);  // ปิดเสียง
+      noTone(BUZZER);     // ปิดเสียง
       vTaskDelay(pdMS_TO_TICKS(off_time));
 
       if (beep_queue >= 2) beep_queue -= 2;
@@ -1576,12 +1642,11 @@ void TaskSound(void* pvParameters) {
 
       if (beep_queue == 0) beep_mode = 0;
     } else {
-      ledcWrite(BUZZER, 0);  // เงียบเมื่อไม่มีคิว
+      noTone(BUZZER);     // เงียบเมื่อไม่มีคิว
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
 }
-
 // ========== [Setup & Loop] ==========
 void setup() {
   Serial.begin(115200);
@@ -1697,7 +1762,7 @@ void setup() {
   setBrightness(config.brightness);
 
   tft.init();
-  tft.setRotation(3);
+  tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
   ui.begin();
   ui.setWiFiReconnectCallback(triggerWiFiReconnect);
