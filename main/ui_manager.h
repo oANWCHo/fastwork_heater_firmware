@@ -148,6 +148,8 @@ enum QuickEditStep {
 typedef void (*ConfigSaveCallback)(const ConfigState& config);
 typedef void (*WiFiSaveCallback)(const WiFiConfig& wifi);  // Saves WiFi config separately
 typedef void (*WiFiReconnectCallback)();  // Callback to trigger WiFi reconnection
+typedef void (*BrightnessPreviewCallback)(uint8_t brightness);  // Preview brightness in real-time
+typedef void (*SoundPreviewCallback)(uint8_t volume);  // Preview sound (play beep at volume)
 
 class UIManager {
 public:
@@ -177,6 +179,8 @@ public:
   int getPresetConfirmedPreset() const { return _preset_confirmed_preset; }
   void setPresetConfirmedPreset(int preset) { _preset_confirmed_preset = preset; }
   void setWiFiReconnectCallback(WiFiReconnectCallback callback) { _wifi_reconnect_callback = callback; }
+  void setBrightnessPreviewCallback(BrightnessPreviewCallback callback) { _brightness_preview_callback = callback; }
+  void setSoundPreviewCallback(SoundPreviewCallback callback) { _sound_preview_callback = callback; }
 
 private:
   TFT_eSPI* _tft;
@@ -206,6 +210,8 @@ private:
   ConfigSaveCallback _save_callback;
   WiFiSaveCallback _wifi_save_callback;  // Separate WiFi save
   WiFiReconnectCallback _wifi_reconnect_callback;  // NEW
+  BrightnessPreviewCallback _brightness_preview_callback;  // Brightness preview
+  SoundPreviewCallback _sound_preview_callback;  // Sound preview
 
   // NEW: Character entry variables
   char _char_entry_buffer[WIFI_PASS_MAX_LEN + 1];  // Temporary buffer for entry

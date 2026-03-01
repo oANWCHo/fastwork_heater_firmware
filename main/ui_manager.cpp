@@ -175,6 +175,8 @@ UIManager::UIManager(TFT_eSPI* tft, ConfigSaveCallback save_callback, WiFiSaveCa
   _char_entry_editing = false;
   memset(_char_entry_buffer, 0, sizeof(_char_entry_buffer));
   _wifi_reconnect_callback = nullptr;
+  _brightness_preview_callback = nullptr;
+  _sound_preview_callback = nullptr;
   _last_cursor_move_time = 0;
   _show_cursor = false;
 }
@@ -1444,6 +1446,10 @@ bool UIManager::handleButtonHold(ConfigState& config) {
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_TEMP_UNIT;
       break;
     case SCREEN_SETTINGS_SOUND:
+      // Restore original volume (undo preview) เพราะ user ไม่ได้กด save
+      if (_sound_preview_callback) {
+        _sound_preview_callback(config.sound_volume);  // restore เสียง
+      }
       _current_screen = SCREEN_SETTINGS_PAGE_1;
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_SOUND;
       break;
@@ -1456,6 +1462,10 @@ bool UIManager::handleButtonHold(ConfigState& config) {
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ABOUT;
       break;
     case SCREEN_SETTINGS_BRIGHTNESS:
+      // Restore original brightness (undo preview) เพราะ user ไม่ได้กด save
+      if (_brightness_preview_callback) {
+        _brightness_preview_callback(config.brightness);
+      }
       _current_screen = SCREEN_SETTINGS_PAGE_1;
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_BRIGHTNESS;
       break;
@@ -1552,6 +1562,10 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         _temp_edit_value += (float)change * 5.0f;  // หมุนทีละ 5%
         if (_temp_edit_value < 0) _temp_edit_value = 0;
         if (_temp_edit_value > 100) _temp_edit_value = 100;
+        // Preview: เปลี่ยนความสว่างจอทันทีระหว่างปรับ
+        if (_brightness_preview_callback) {
+          _brightness_preview_callback((uint8_t)_temp_edit_value);
+        }
         break;
       }
     case SCREEN_QUICK_EDIT_AUTO:
@@ -1707,6 +1721,10 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
         _temp_edit_value += (float)change * 5.0f;  // ปรับทีละ 5%
         if (_temp_edit_value < 0) _temp_edit_value = 0;
         if (_temp_edit_value > 100) _temp_edit_value = 100;
+        // Preview: เล่นเสียง beep ทุกครั้งที่บิด knob
+        if (_sound_preview_callback) {
+          _sound_preview_callback((uint8_t)_temp_edit_value);
+        }
         break;
       }
     case SCREEN_SETTINGS_TEMP_UNIT:
