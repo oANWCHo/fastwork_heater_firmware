@@ -70,11 +70,9 @@
 
 #ifdef AUTO_USE_DIFFERENCE_MODE
   // Cycle transition: object removed when temp drops this much from peak
-  #define AUTO_DROP_THRESHOLD    30.0f   // °C drop from peak_temp to trigger next cycle
-  // Safety: if IR reads within this margin of ambient for too long, no object is present  
-  #define AUTO_NO_OBJECT_MARGIN  10.0f   // °C above ambient = "no object"
-  // Safety: time (ms) IR must stay near ambient before auto-stop (no object)
-  #define AUTO_NO_OBJECT_TIMEOUT 30000   // 30 seconds
+  #define AUTO_DROP_THRESHOLD    15.0f   // °C drop from peak_temp to trigger next cycle
+  // Safety: if drop persists longer than this → stop Auto Mode entirely
+  #define AUTO_STOP_TIMEOUT_MS   20000   // 10 seconds — drop sustained = no object, stop
 #else
   // Legacy absolute threshold mode
   #define AUTO_ABS_THRESHOLD     40.0f   // °C absolute threshold for cycle change
@@ -236,9 +234,9 @@ AsyncWebServer server(80);
 bool serverStarted = false;
 
 // ========== [PID Vars] ==========
-float Kp[3] = { 1.2f, 1.2f, 1.2f };
-float Ki[3] = { 0.02f, 0.02f, 0.02f };
-float Kd[3] = { 0.2f, 0.2f, 0.2f };
+float Kp[3] = { 3.5f, 3.5f, 3.5f };
+float Ki[3] = { 0.15f, 0.15f, 0.15f };
+float Kd[3] = { 1.5f, 1.5f, 1.5f };
 float pid_integral[3] = { 0.0f, 0.0f, 0.0f };
 float pid_prev_error[3] = { 0.0f, 0.0f, 0.0f };
 uint32_t pid_last_time[3] = { 0, 0, 0 };
@@ -591,7 +589,8 @@ void TaskHeater1Control(void* pvParameters) {
   float last_displayed_val = 0;
   bool prev_ready_state = false;
 
-  uint32_t auto_low_temp_timer = 0;
+  uint32_t auto_drop_timer = 0;   // Timer: how long peak-drop >= threshold has persisted
+  bool auto_paused = false;        // true = drop detected, heater paused temporarily
 
   for (;;) {
     float current_t = NAN;
@@ -748,6 +747,11 @@ void TaskHeater1Control(void* pvParameters) {
     }
     prev_ready_state = is_ready_status;
 
+    // [AUTO PAUSE] If drop detected (object removed), force heater OFF temporarily
+    if (auto_paused && auto_is_running) {
+      output_percent = 0.0f;
+    }
+
     tpo_set_percent(HEATER_IDX, output_percent);
 
     if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
@@ -755,7 +759,14 @@ void TaskHeater1Control(void* pvParameters) {
       xSemaphoreGive(dataMutex);
     }
 
-    // === AUTO MODE CYCLE TRANSITION (only Heater 1) ===
+    // === AUTO MODE CYCLE TRANSITION + SAFETY (only Heater 1) ===
+    // Logic:
+    //   Peak is tracked continuously (not just after Ready).
+    //   When peak_temp - control_temp >= DROP_THRESHOLD:
+    //     - Pause heater immediately (auto_paused = true)
+    //     - Start a drop timer
+    //     - If temp recovers (drop < threshold) BEFORE 10s → resume heat + advance cycle
+    //     - If drop persists >= 10s continuously → STOP Auto Mode (no object)
     if (auto_is_running && has_go_to) {
 #if AUTO_CONTROL_SENSOR == 1
       float control_temp = ir1_temp;
@@ -763,38 +774,63 @@ void TaskHeater1Control(void* pvParameters) {
       float control_temp = sysState.tc_temps[HEATER_IDX];
 #endif
       if (!isnan(control_temp)) {
-        if (is_ready_status) {
-          has_reached_target = true;
-          if (control_temp > peak_temp) peak_temp = control_temp;
-        }
+        // Track peak continuously — no need to wait for Ready
+        if (control_temp > peak_temp) peak_temp = control_temp;
 
-#ifdef AUTO_USE_DIFFERENCE_MODE
-        // [DIFFERENCE MODE] Object removed = temp dropped significantly from peak
-        // Works with wide-FOV IR (90°) where ambient stays above 40°C
-        bool object_removed = has_reached_target 
-                              && (peak_temp > 0) 
-                              && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
-#else
-        // [ABSOLUTE MODE] Object removed = temp dropped below absolute threshold
-        // Original logic — works when IR reads near ambient (~25°C) after object removed
-        // bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
-        bool object_removed = has_reached_target && (control_temp < AUTO_ABS_THRESHOLD);
-#endif
+        bool drop_detected = (peak_temp > 0) 
+                             && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
 
-        if (object_removed) {
-          if (millis() - cycle_change_debounce > 1000) {
-            if (current_auto_step < 3) {
-              current_auto_step++;
-            } else {
-              current_auto_step = 1;
-            }
-            if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-              sysState.auto_step = current_auto_step;
+        if (drop_detected) {
+          // Pause heater immediately
+          auto_paused = true;
+
+          // Start or continue timing
+          if (auto_drop_timer == 0) {
+            auto_drop_timer = millis();
+            Serial.printf("[AUTO] Drop detected: peak=%.1f control=%.1f diff=%.1f → Heater PAUSED\n",
+                          peak_temp, control_temp, peak_temp - control_temp);
+          }
+          else if (millis() - auto_drop_timer >= AUTO_STOP_TIMEOUT_MS) {
+            // Drop persisted >= 10 seconds → STOP Auto Mode entirely
+            if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+              has_go_to = false;
+              sysState.auto_was_started = false;
+              sysState.auto_step = 0;
+              sysState.preset_was_started = false;
+              sysState.preset_running = false;
               xSemaphoreGive(dataMutex);
             }
+            beep_mode = 3;
+            beep_queue = 4;
             peak_temp = 0;
             has_reached_target = false;
-            cycle_change_debounce = millis();
+            auto_paused = false;
+            auto_drop_timer = 0;
+            cycle_change_debounce = 0;
+            Serial.println("[AUTO] Drop sustained >10s → Auto Mode STOPPED");
+          }
+        } else {
+          // Temp recovered (drop < threshold)
+          if (auto_drop_timer != 0) {
+            // Was dropping but recovered before 10s → resume heat + advance cycle
+            auto_paused = false;
+            
+            if (millis() - cycle_change_debounce > 1000) {
+              if (current_auto_step < 3) {
+                current_auto_step++;
+              } else {
+                current_auto_step = 1;
+              }
+              if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+                sysState.auto_step = current_auto_step;
+                xSemaphoreGive(dataMutex);
+              }
+              peak_temp = 0;
+              has_reached_target = false;
+              cycle_change_debounce = millis();
+              Serial.printf("[AUTO] Object returned → Heater RESUMED → Cycle %d\n", current_auto_step);
+            }
+            auto_drop_timer = 0;
           }
         }
       }
@@ -810,76 +846,11 @@ void TaskHeater1Control(void* pvParameters) {
       peak_temp = 0;
       has_reached_target = false;
       cycle_change_debounce = 0;
-      auto_low_temp_timer = 0;
+      auto_drop_timer = 0;
+      auto_paused = false;
     }
 
-    // === AUTO MODE SAFETY: No-object detection ===
-    // If heater is running but no object is present for extended time → auto-stop
-    if (auto_is_running && has_go_to) {
-
-#ifdef AUTO_USE_DIFFERENCE_MODE
-      // [DIFFERENCE MODE] No object = IR reads within margin of ambient temp
-      // Wide-FOV IR (90°) picks up heater radiation, so ambient alone may read >40°C.
-      // Instead, check if (ir_object - ir_ambient) is small → no object on heater.
-      bool no_object = false;
-      if (!isnan(ir1_temp) && !isnan(ir1_ambient)) {
-        float ir_diff = ir1_temp - ir1_ambient;
-        no_object = (ir_diff < AUTO_NO_OBJECT_MARGIN);
-      }
-      if (no_object) {
-        if (auto_low_temp_timer == 0) {
-          auto_low_temp_timer = millis();
-        }
-        else if (millis() - auto_low_temp_timer > AUTO_NO_OBJECT_TIMEOUT) {
-          // No object detected for too long → stop
-          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            has_go_to = false;
-            sysState.auto_was_started = false;
-            sysState.auto_step = 0;
-            sysState.preset_was_started = false;
-            sysState.preset_running = false;
-            xSemaphoreGive(dataMutex);
-          }
-          beep_mode = 3;
-          beep_queue = 4;
-          auto_low_temp_timer = 0;
-        }
-      } else {
-        // Object present (IR - ambient >= margin) → reset timer
-        auto_low_temp_timer = 0;
-      }
-#else
-      // [ABSOLUTE MODE] No object = IR reads below absolute threshold
-      // Original logic — works when IR reads near room temp (~25°C) after object removed
-      // if (!isnan(ir1_temp) && ir1_temp < 40.0f) { ... }
-      if (!isnan(ir1_temp) && ir1_temp < AUTO_ABS_SAFETY_TEMP) {
-        if (auto_low_temp_timer == 0) {
-          auto_low_temp_timer = millis(); 
-        } 
-        else if (millis() - auto_low_temp_timer > AUTO_ABS_SAFETY_MS) {
-          // สั่ง Stop การทำงาน
-          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-            has_go_to = false;               
-            sysState.auto_was_started = false; 
-            sysState.auto_step = 0;        
-            sysState.preset_was_started = false;
-            sysState.preset_running = false;
-            xSemaphoreGive(dataMutex);
-          }
-          beep_mode = 3; 
-          beep_queue = 4; 
-          auto_low_temp_timer = 0; 
-        }
-      } else {
-        // ถ้าอุณหภูมิเกิน threshold หรืออ่านค่าไม่ได้ ให้รีเซ็ตเวลา
-        auto_low_temp_timer = 0; 
-      }
-#endif
-
-    } else {
-      // ถ้าไม่ได้รัน Auto ก็รีเซ็ตเวลาทิ้ง
-      auto_low_temp_timer = 0;
-    }
+    // (No-object safety is now integrated into cycle transition above)
 
     // === Display Freeze Logic ===
     float tc_temp = NAN;
