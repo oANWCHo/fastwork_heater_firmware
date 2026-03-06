@@ -799,6 +799,11 @@ void TaskHeater1Control(void* pvParameters) {
         bool drop_detected = (peak_temp > 0) && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
 
         if (drop_detected) {
+
+          if (!auto_paused) {
+            beep_mode = 1;
+            beep_queue = 2; // ดัง "ติ๊ด" สั้น 1 ครั้ง
+          }
           // Pause heater immediately
           auto_paused = true;
 
@@ -818,8 +823,8 @@ void TaskHeater1Control(void* pvParameters) {
               sysState.preset_running = false;
               xSemaphoreGive(dataMutex);
             }
-            beep_mode = 3;
-            beep_queue = 4;
+            beep_mode = 1;   
+            beep_queue = 6;
             peak_temp = 0;
             has_reached_target = false;
             auto_paused = false;
