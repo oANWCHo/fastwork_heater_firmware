@@ -266,7 +266,10 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
   }
 
   if (_current_screen == SCREEN_SETTINGS_WIFI_SSID || 
-      _current_screen == SCREEN_SETTINGS_WIFI_PASSWORD) {
+      _current_screen == SCREEN_SETTINGS_WIFI_PASSWORD ||
+      _current_screen == SCREEN_QUICK_EDIT ||
+      _current_screen == SCREEN_QUICK_EDIT_AUTO ||
+      _current_screen == SCREEN_QUICK_EDIT_PRESET) {
     _show_cursor = true; 
   }
 
@@ -1816,9 +1819,9 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
 
   for (int i = 0; i < 3; i++) {
     int x = gap + (i * (card_w + gap));
-    bool is_selected = (i == _manual_selection_nav && _show_cursor);
+    bool is_editing_this = (_current_screen == SCREEN_QUICK_EDIT && i == _manual_selection_nav);
+    bool is_selected = (i == _manual_selection_nav) && (_show_cursor || is_editing_this);
     bool is_active = config.heater_active[i];
-    bool is_editing_this = (_current_screen == SCREEN_QUICK_EDIT && is_selected);
     
     bool system_engaged = state.auto_running_background || state.preset_running;
     bool is_in_use = is_active && system_engaged;
@@ -1828,9 +1831,9 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     uint16_t border_col = color565(0xD0, 0xE8, 0xD0);  // เขียวอ่อนสำหรับ default border
 
     // Cursor/selection border ใช้ #09904B แทน TFT_RED
-    if (is_editing_this) border_col = _blink_state ? C_MANUAL_GREEN : TFT_DARKGREY;
+    if (is_editing_this) border_col = C_MANUAL_GREEN;
     else if (is_selected) border_col = C_MANUAL_GREEN;        
-    else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;         
+    else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;       
     
     _spr.fillRoundRect(x + 2, card_y + 2, card_w, card_h, 5, 0xBDF7); 
     _spr.fillRoundRect(x, card_y, card_w, card_h, 5, bg_color);
@@ -1928,7 +1931,7 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     uint16_t edit_color = TFT_BLACK;
 
     if (is_editing_this) {
-        edit_color = C_MANUAL_GREEN; // ใช้สีเขียวแทน TFT_RED ตอน edit
+        edit_color = _blink_state ? TFT_BLUE : C_MANUAL_GREEN;
         if (_quick_edit_step == Q_EDIT_TARGET) { label_txt = "SET >"; val_to_show = config.target_temps[i]; }
         else { label_txt = "MAX >"; val_to_show = config.max_temps[i]; }
     }
@@ -2052,15 +2055,15 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   for (int i = 0; i < 3; i++) {
     int x = gap + (i * (card_w + gap));
     bool is_active_step = (state.auto_step == (i + 1));
-    bool is_selected = (_auto_selection == i && _show_cursor);
-    bool is_editing = (_current_screen == SCREEN_QUICK_EDIT_AUTO && is_selected);
+    bool is_editing = (_current_screen == SCREEN_QUICK_EDIT_AUTO && _auto_selection == i);
+    bool is_selected = (_auto_selection == i) && (_show_cursor || is_editing);
     
     // สีพื้นกล่อง: active/heating = #ecfdfd, ไม่ active = ขาว
     uint16_t bg = (is_active_step && globalRun) ? C_CARD_ACTIVE : TFT_WHITE;
     uint16_t border = color565(0xD0, 0xE0, 0xE0);  // default border อ่อน
 
     // Cursor/selection border ใช้ #00B3B9
-    if (is_editing) border = _blink_state ? C_AUTO_CYAN : TFT_DARKGREY;
+    if (is_editing) border = C_AUTO_CYAN;
     else if (is_selected) border = C_AUTO_CYAN;
     else if (is_active_step && globalRun) border = C_AUTO_CYAN;
 
@@ -2091,14 +2094,14 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     // "SET" / "MAX" label — ใช้ built-in font เล็กลง 1 step
     _spr.unloadFont();
     _spr.setTextSize(1);
-    _spr.setTextColor(TFT_BLACK, bg);
+    _spr.setTextColor(is_editing ? (_blink_state ? TFT_BLUE : C_AUTO_CYAN) : TFT_BLACK, bg);
     _spr.setTextDatum(TC_DATUM);
     _spr.drawString(label_txt, cx, card_y + 30);
 
     // --- ไล่สีอุณหภูมิอิงจาก auto_max_temps ---
     uint16_t val_color;
     if (is_editing) {
-      val_color = C_AUTO_CYAN;  // สี cyan ตอน edit
+      val_color = _blink_state ? TFT_BLUE : C_AUTO_CYAN;
     } else {
       float max_t = config.auto_max_temps[i];
       float cur_set = config.auto_target_temps[i];
@@ -2256,9 +2259,9 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   for (int i = 0; i < 4; i++) {
     int col = i % 2; int row = i / 2;
     int x = gap + (col * (card_w + gap)); int y = grid_y + (row * (card_h + gap));
-    bool isCursor = (_preset_selection == i && _show_cursor);
+    bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_PRESET && _preset_selection == i);
+    bool isCursor = (_preset_selection == i) && (_show_cursor || isEditingThis);
     bool isConfirmed = (_preset_confirmed_preset == i);
-    bool isEditingThis = (_current_screen == SCREEN_QUICK_EDIT_PRESET && isCursor);
     bool isThisPresetActive = (state.preset_index == i && state.preset_running);
 
     // สีพื้นกล่อง: active/confirmed = #ecfdfd, อื่นๆ = ขาว
@@ -2290,13 +2293,13 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
     _spr.unloadFont();
     _spr.setTextSize(1);
     _spr.setTextDatum(TL_DATUM);
-    _spr.setTextColor(isEditingThis ? C_PRESET_OLIVE : TFT_DARKGREY, bg);
+    _spr.setTextColor(isEditingThis ? (_blink_state ? TFT_BLUE : C_PRESET_OLIVE) : TFT_DARKGREY, bg);
     _spr.drawString(label_txt, x + 42, y + 5);
 
     // --- ไล่สีอุณหภูมิอิงจาก preset_max_temps ---
     uint16_t val_color;
     if (isEditingThis) {
-      val_color = C_PRESET_OLIVE;
+      val_color = _blink_state ? TFT_BLUE : C_PRESET_OLIVE;
     } else {
       float max_t = config.preset_max_temps[i];
       float cur_set = config.preset_target_temps[i];
