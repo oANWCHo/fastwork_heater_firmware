@@ -2141,8 +2141,18 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     else if (isLocked) { status_txt = "LOCK"; status_col = _blink_state ? TFT_RED : bg; }
     else if (!is_active_step || !globalRun) { status_txt = "IDLE"; status_col = TFT_BLUE; }
     else {
-      if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
-      else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
+      if (state.auto_paused) { 
+        status_txt = "WAIT"; 
+        status_col = TFT_ORANGE; 
+      }
+      else if (state.heater_ready[0]) { 
+        status_txt = "READY"; 
+        status_col = 0x07E0; 
+      }
+      else { 
+        status_txt = "HEATING"; 
+        status_col = TFT_ORANGE; 
+      }
     }
 
     _spr.loadFont(Arial12); 

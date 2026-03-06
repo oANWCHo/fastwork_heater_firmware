@@ -70,9 +70,9 @@
 
 #ifdef AUTO_USE_DIFFERENCE_MODE
   // Cycle transition: object removed when temp drops this much from peak
-  #define AUTO_DROP_THRESHOLD    15.0f   // °C drop from peak_temp to trigger next cycle
+  #define AUTO_DROP_THRESHOLD    30.0f   // °C drop from peak_temp to trigger next cycle
   // Safety: if drop persists longer than this → stop Auto Mode entirely
-  #define AUTO_STOP_TIMEOUT_MS   20000   // 10 seconds — drop sustained = no object, stop
+  #define AUTO_STOP_TIMEOUT_MS   10000   // 10 seconds — drop sustained = no object, stop
 #else
   // Legacy absolute threshold mode
   #define AUTO_ABS_THRESHOLD     40.0f   // °C absolute threshold for cycle change
@@ -186,6 +186,7 @@ struct SharedData {
   bool heater_cutoff[3];
   bool heater_ready[3];  // True if stable for 10s
   uint8_t auto_step;     // 0=Off, 1=Cycle1, 2=Cycle2, 3=Cycle3
+  bool auto_paused;
   bool auto_mode_enabled;
   bool auto_was_started;
   bool preset_was_started;
@@ -592,6 +593,9 @@ void TaskHeater1Control(void* pvParameters) {
   uint32_t auto_drop_timer = 0;   // Timer: how long peak-drop >= threshold has persisted
   bool auto_paused = false;        // true = drop detected, heater paused temporarily
 
+  uint8_t prev_auto_step = 0;
+  uint32_t cycle_start_time = 0;
+
   for (;;) {
     float current_t = NAN;
     float ir1_temp = NAN;
@@ -747,12 +751,8 @@ void TaskHeater1Control(void* pvParameters) {
     }
     prev_ready_state = is_ready_status;
 
-    // [AUTO PAUSE] If drop detected (object removed), force heater OFF temporarily
-    if (auto_paused && auto_is_running) {
-      output_percent = 0.0f;
-    }
-
-    tpo_set_percent(HEATER_IDX, output_percent);
+    // NOTE: tpo_set_percent is called AFTER cycle transition below,
+    // so auto_paused can be properly resolved before setting heater output.
 
     if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
       sysState.heater_cutoff[HEATER_IDX] = cutoff_active;
@@ -775,10 +775,28 @@ void TaskHeater1Control(void* pvParameters) {
 #endif
       if (!isnan(control_temp)) {
         // Track peak continuously — no need to wait for Ready
-        if (control_temp > peak_temp) peak_temp = control_temp;
+        if (current_auto_step != prev_auto_step) {
+          cycle_start_time = millis();
+          peak_temp = control_temp; // รีเซ็ต Peak เป็นค่าปัจจุบันก่อน
+          prev_auto_step = current_auto_step;
+          Serial.printf("[AUTO] Cycle %d Started. Waiting 3s before tracking peak...\n", current_auto_step);
+        }
 
-        bool drop_detected = (peak_temp > 0) 
-                             && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
+        bool is_cooling_down = (control_temp > (target_t + 2.0f));
+
+        if (is_cooling_down) {
+          // ถ้าอุณหภูมิสูงกว่าเป้าหมาย (เช่นลงจาก C3 มา C1)
+          // ให้ Peak ไหลตามลงมาเรื่อยๆ ห้ามจับผลต่างเด็ดขาด
+          peak_temp = control_temp;
+        } else if (millis() - cycle_start_time < 3000) {
+          peak_temp = control_temp; // บังคับให้ Peak เท่ากับปัจจุบันเพื่อไม่ให้ผลต่างเกิน Threshold
+        } else {
+          // เลย 3 วินาทีแล้ว ถึงจะเริ่มอัปเดตค่าสูงสุดจริงจัง
+          if (control_temp > peak_temp) peak_temp = control_temp;
+        }
+        // -------------------------------------------------------
+
+        bool drop_detected = (peak_temp > 0) && ((peak_temp - control_temp) >= AUTO_DROP_THRESHOLD);
 
         if (drop_detected) {
           // Pause heater immediately
@@ -848,9 +866,17 @@ void TaskHeater1Control(void* pvParameters) {
       cycle_change_debounce = 0;
       auto_drop_timer = 0;
       auto_paused = false;
+      current_auto_step = 0; 
+      prev_auto_step = 0;
     }
 
     // (No-object safety is now integrated into cycle transition above)
+
+    // === FINAL HEATER OUTPUT (after cycle transition resolves auto_paused) ===
+    if (auto_paused && auto_is_running) {
+      output_percent = 0.0f;
+    }
+    tpo_set_percent(HEATER_IDX, output_percent);
 
     // === Display Freeze Logic ===
     float tc_temp = NAN;
@@ -874,7 +900,7 @@ void TaskHeater1Control(void* pvParameters) {
     if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
       sysState.heater_ready[HEATER_IDX] = is_ready_status;
       sysState.displayed_temps[HEATER_IDX] = val_to_display;
-      sysState.auto_step = current_auto_step;
+      sysState.auto_paused = auto_paused;
       xSemaphoreGive(dataMutex);
     }
 
@@ -1307,6 +1333,9 @@ void TaskInput(void* pvParameters) {
                   }
                   if (any_heater_ok) {
                     sysState.preset_was_started = true;
+                    sysState.auto_was_started = false;
+                    sysState.auto_step = 0;
+                    sysState.preset_running = false;
                     has_go_to = true;
                   } else {
                     beep_mode = 3;
@@ -1321,6 +1350,8 @@ void TaskInput(void* pvParameters) {
                   } else {
                     sysState.auto_was_started = true;
                     sysState.auto_step = 1;
+                    sysState.preset_was_started = false;
+                    sysState.preset_running = false;
                     has_go_to = true;
                   }
 
@@ -1331,6 +1362,9 @@ void TaskInput(void* pvParameters) {
                     beep_queue = 2;
                   } else {
                     sysState.preset_running = true;
+                    sysState.preset_was_started = true;
+                    sysState.auto_was_started = false;
+                    sysState.auto_step = 0;
                     sysState.preset_index = ui.getPresetConfirmedPreset();
                     has_go_to = true;
                   }
@@ -1421,6 +1455,7 @@ void TaskDisplay(void* pvParameters) {
         st.heater_ready[i] = sysState.heater_ready[i];
       }
       st.auto_step = sysState.auto_step;
+      st.auto_paused = sysState.auto_paused;
       st.auto_mode_enabled = sysState.auto_mode_enabled;
       st.auto_running_background = (has_go_to && sysState.auto_was_started && sysState.auto_step > 0);
       st.preset_running_background = (has_go_to && sysState.preset_was_started);
@@ -1657,15 +1692,18 @@ void setup() {
   preferences.begin("app_config", false);
   loadConfig(config);
 
-  if (config.auto_target_temps[0] == 0.0f) {
-    for (int i = 0; i < 3; i++) {
-      config.auto_target_temps[i] = 100.0f;
-      config.auto_max_temps[i] = 250.0f;
-    }
-    for (int i = 0; i < 4; i++) {
-      config.preset_target_temps[i] = 100.0f;
-      config.preset_max_temps[i] = 250.0f;
-    }
+  bool config_dirty = false;
+  for (int i = 0; i < 3; i++) {
+    if (config.auto_target_temps[i] <= 0.0f) { config.auto_target_temps[i] = 100.0f; config_dirty = true; }
+    if (config.auto_max_temps[i] <= 0.0f)   { config.auto_max_temps[i] = 250.0f; config_dirty = true; }
+    if (config.target_temps[i] <= 0.0f)      { config.target_temps[i] = 100.0f; config_dirty = true; }
+    if (config.max_temps[i] <= 0.0f)         { config.max_temps[i] = 250.0f; config_dirty = true; }
+  }
+  for (int i = 0; i < 4; i++) {
+    if (config.preset_target_temps[i] <= 0.0f) { config.preset_target_temps[i] = 100.0f; config_dirty = true; }
+    if (config.preset_max_temps[i] <= 0.0f)   { config.preset_max_temps[i] = 250.0f; config_dirty = true; }
+  }
+  if (config_dirty) {
     saveConfig(config);
   }
 
