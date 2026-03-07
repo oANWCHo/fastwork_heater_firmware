@@ -110,6 +110,9 @@ enum FaultReason : uint8_t {
   FAULT_HW_BIT,          // MAX31855 fault bit (OC/SC/SCV) held >500ms
   FAULT_STUCK,           // Raw data unchanged >2s
   FAULT_NAN_ACTIVE,      // Heater active but sensor NaN (global stop trigger)
+  FAULT_HW_OC,           // Open Circuit (สายหลวม/ขาด)
+  FAULT_HW_SCG,          // Short to GND
+  FAULT_HW_SCV           // Short to VCC
 };
 
 // ========== [Fault Log System] ==========
@@ -168,6 +171,9 @@ const char* faultReasonStr(uint8_t code) {
     case FAULT_HW_BIT:      return "MAX31855 HW fault (OC/SC) >500ms";
     case FAULT_STUCK:       return "Data stuck >2s – temp unchanged";
     case FAULT_NAN_ACTIVE:  return "Sensor NaN while heater active – EMERGENCY STOP";
+    case FAULT_HW_OC:       return "MAX31855 Open Circuit (OC)";
+    case FAULT_HW_SCG:      return "MAX31855 Short to GND (SCG)";
+    case FAULT_HW_SCV:      return "MAX31855 Short to VCC (SCV)";
     default:                return "Unknown";
   }
 }
@@ -418,6 +424,8 @@ void TaskMAX(void* pvParameters) {
         bool is_fault = false;
         uint8_t fault_reason = FAULT_NONE;
 
+        bool hw_fault_active = false;
+
         if (d == 0) {
           is_fault = true;
           fault_reason = FAULT_SPI_ZERO;
@@ -425,18 +433,29 @@ void TaskMAX(void* pvParameters) {
           is_fault = true;
           fault_reason = FAULT_SPI_FF;
         } else if (d & 0x10000) {
+          hw_fault_active = true;
           if (fault_start_time[i] == 0) {
             fault_start_time[i] = millis();
           }
           if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
             is_fault = true;
-            fault_reason = FAULT_HW_BIT;
+            
+            if (d & 0x01) {
+              fault_reason = FAULT_HW_OC;       // Bit 0 = Open Circuit
+            } else if (d & 0x02) {
+              fault_reason = FAULT_HW_SCG;      // Bit 1 = Short to GND
+            } else if (d & 0x04) {
+              fault_reason = FAULT_HW_SCV;      // Bit 2 = Short to VCC
+            } else {
+              fault_reason = FAULT_HW_BIT;      // หากไม่ตรงกับ 3 อาการบนเลย
+            }
           }
         } else {
           fault_start_time[i] = 0;
         }
 
-        if (!is_fault) {
+        
+        if (!is_fault && !hw_fault_active) {
           if (d == prev_raw_data[i]) {
             if ((millis() - task_start_time > STARTUP_GRACE_MS) && 
                 (millis() - last_change_time[i] > STUCK_THRESHOLD_MS)) {
@@ -447,23 +466,29 @@ void TaskMAX(void* pvParameters) {
             prev_raw_data[i] = d;
             last_change_time[i] = millis();
           }
-        } else {
-          prev_raw_data[i] = d;
-          last_change_time[i] = millis();
         }
 
         if (is_fault) {
           raw_temp = NAN;
           ma_count[i] = 0;
           ma_idx[i] = 0;
-        } else {
+        } else if (!hw_fault_active) { 
+          // จะดึงข้อมูลมาใช้ ก็ต่อเมื่อไม่มี HW Fault เท่านั้น
           int32_t v = (d >> 18) & 0x3FFF;
-          if (d & 0x20000000) v -= 16384;
+          if (d & 0x80000000) v -= 16384; // [แก้ไข] ใช้ Bit 31 สำหรับ Sign Bit
           raw_temp = v * 0.25f;
         }
 
         float final_temp = NAN;
-        if (!is_fault) {
+        if (is_fault) {
+           // ปล่อยให้ final_temp เป็น NAN
+        } else if (hw_fault_active) {
+           // [หัวใจสำคัญ] ถ้า Hardware ส่งสัญญาณรวนชั่วคราว ให้ดึงค่าเฉลี่ยเดิมมาใช้ไปก่อน ห้ามอัปเดต Buffer ใหม่
+           float sum = 0;
+           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
+           if (ma_count[i] > 0) final_temp = sum / ma_count[i];
+        } else {
+          // สภาวะปกติ อัปเดต Buffer ตามปกติ
           ma_buffer[i][ma_idx[i]] = raw_temp;
           ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
           if (ma_count[i] < MA_WINDOW) ma_count[i]++;

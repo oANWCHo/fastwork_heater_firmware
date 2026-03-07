@@ -84,20 +84,20 @@ const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
 };
 
 const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
-  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness", "About"
+  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness"
 };
 
 // [ADDED] Page 3 Labels
 const char* menu_item_labels_page_3[MENU_PAGE3_ITEM_COUNT] = {
-  "WiFi Settings"
+  "WiFi Settings", "About"
 };
 
 // Unified settings menu labels (all pages combined)
 const int SETTINGS_TOTAL_ITEMS = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
 const char* settings_all_labels[] = {
   "Max Temp Lock", "Heater Calibration", "IR Emissivity", "TC Probe Cal",
-  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness", "About",
-  "WiFi Settings"
+  "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness",
+  "WiFi Settings", "About"
 };
 
 // [ADDED] WiFi Menu Labels
@@ -105,7 +105,7 @@ const char* wifi_menu_labels[WIFI_MENU_ITEM_COUNT] = {
   "Edit SSID", "Edit Password", "Connection Status", "Reconnect WiFi", "< Back"
 };
 
-const char* startup_mode_labels[STARTUP_MODE_COUNT] = { "OFF", "Auto Run" };
+const char* startup_mode_labels[STARTUP_MODE_COUNT] = { "OFF", "Manual Mode Heater Start" };
 const char* idle_off_labels[IDLE_OFF_ITEM_COUNT] = { "10 sec. (Debug)", "15 min.", "30 min.", "60 min.", "Always ON" };
 const char* temp_unit_labels[2] = { "Celsius (C)", "Fahrenheit (F)" };
 const char* manual_button_labels[6] = { "Heater1", "Heater2", "Heater3", "start", "stop", "Settings" };
@@ -1180,18 +1180,18 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
             _current_screen = SCREEN_SETTINGS_BRIGHTNESS;
             _temp_edit_value = (float)config.brightness;
             break;
-          case MENU_PAGE2_ABOUT:
-            _current_screen = SCREEN_SETTINGS_ABOUT;
-            break;
         }
       }
-      // Page 3 items: 10+
+      // Page 3 items: 9+
       else {
         int p3_idx = idx - MENU_PAGE1_ITEM_COUNT - MENU_PAGE2_ITEM_COUNT;
         switch (p3_idx) {
           case MENU_PAGE3_WIFI_SETTINGS:
             _current_screen = SCREEN_SETTINGS_WIFI_MENU;
             _selected_wifi_menu_item = 0;
+            break;
+          case MENU_PAGE3_ABOUT:
+            _current_screen = SCREEN_SETTINGS_ABOUT;
             break;
         }
       }
@@ -1397,7 +1397,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       return true;
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_1;
-      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ABOUT;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ABOUT;
       return true;
     default: return false;
   }
@@ -1462,7 +1462,7 @@ bool UIManager::handleButtonHold(ConfigState& config) {
       break;
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_1;
-      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ABOUT;
+      _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ABOUT;
       break;
     case SCREEN_SETTINGS_BRIGHTNESS:
       // Restore original brightness (undo preview) เพราะ user ไม่ได้กด save
@@ -1833,7 +1833,13 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     // Cursor/selection border ใช้ #09904B แทน TFT_RED
     if (is_editing_this) border_col = C_MANUAL_GREEN;
     else if (is_selected) border_col = C_MANUAL_GREEN;        
+    else if (state.tc_faults[i]) border_col = color565(0xD0, 0xE8, 0xD0);  // NC = เทาเหมือน OFF
     else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;       
+    
+    // NC (fault) ให้ bg เป็นสีเดียวกับ OFF
+    if (state.tc_faults[i] && !is_editing_this && !is_selected) {
+      bg_color = C_CARD_HIGHLIGHT;
+    }
     
     _spr.fillRoundRect(x + 2, card_y + 2, card_w, card_h, 5, 0xBDF7); 
     _spr.fillRoundRect(x, card_y, card_w, card_h, 5, bg_color);
@@ -1879,7 +1885,7 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     if (!is_active && !is_in_use) {
       temp_color = TFT_DARKGREY;
     } else if (state.tc_faults[i]) {
-      temp_color = TFT_RED;
+      temp_color = TFT_DARKGREY;
     } else if (state.heater_cutoff_state[i]) {
       temp_color = TFT_RED;
     } else if (isnan(state.tc_temps[i])) {
@@ -1948,9 +1954,9 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     uint16_t status_col = TFT_DARKGREY;
 
     if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
-    else if (state.tc_faults[i]) { status_txt = "FAULT"; status_col = TFT_RED; }
+    else if (state.tc_faults[i]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
     else if (state.heater_cutoff_state[i]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
-    else if (is_in_use) { status_txt = "IN-USE"; status_col = 0x07E0; }  // เขียวสำหรับ IN-USE
+    else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }  // เทาสำหรับ IN-USE
     else if (state.is_heating_active) { 
         if (state.heater_ready[i]) { status_txt = "READY"; status_col = 0x07E0; }
         else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
@@ -2139,8 +2145,8 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     // Status Row
     const char* status_txt = "IDLE";
     uint16_t status_col = TFT_BLUE;
-    if (state.tc_faults[0]) { status_txt = "H1 OFF"; status_col = TFT_RED; }
-    else if (isOtherModeRunning) { status_txt = "IN-USE"; status_col = 0x7BEF; }
+    if (state.tc_faults[0]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
+    else if (isOtherModeRunning) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }
     else if (isLocked) { status_txt = "LOCK"; status_col = _blink_state ? TFT_RED : bg; }
     else if (!is_active_step || !globalRun) { status_txt = "IDLE"; status_col = TFT_BLUE; }
     else {
@@ -2334,13 +2340,13 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
 
     // --- สถานะ (Dot + Text) ---
     const char* p_status = "OFF"; uint16_t p_col = TFT_DARKGREY;
-    if (state.tc_faults[0]) { p_status = "FAULT"; p_col = TFT_RED; }
-    else if (isOtherModeRunning) { p_status = "IN-USE"; p_col = 0x7BEF; }
+    if (state.tc_faults[0]) { p_status = "NC"; p_col = TFT_DARKGREY; }
+    else if (isOtherModeRunning) { p_status = "IN-USE"; p_col = TFT_DARKGREY; }
     else if (isThisPresetActive && globalRun) {
         if (state.heater_ready[0]) { p_status = "READY"; p_col = 0x07E0; }
         else { p_status = "HEATING"; p_col = TFT_ORANGE; }
     } else if (state.preset_running && globalRun && !isThisPresetActive) {
-        p_status = "IN-USE"; p_col = 0x7BEF;
+        p_status = "IN-USE"; p_col = TFT_DARKGREY;
     } else if (isConfirmed) { p_status = "IDLE"; p_col = TFT_BLUE; }
 
     _spr.loadFont(Arial12); _spr.fillCircle(x + 45, y + 42, 3, p_col);
@@ -2364,8 +2370,8 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   bool isLocked = state.heater_cutoff_state[0];
   bool isReady = state.heater_ready[0];
 
-  if (state.tc_faults[0]) { status_text = "H1 FAULT"; status_color = TFT_RED; }
-  else if (isOtherModeRunning) { status_text = "System In-Use"; status_color = TFT_ORANGE; }
+  if (state.tc_faults[0]) { status_text = "H1 NC"; status_color = TFT_DARKGREY; }
+  else if (isOtherModeRunning) { status_text = "System In-Use"; status_color = TFT_DARKGREY; }
   else if (activePresetIdx >= 0) {
     if (isLocked) { status_text = "Locked"; status_color = _blink_state ? TFT_RED : TFT_BLACK; }
     else if (isReady) { status_text = "Ready"; status_color = 0x07E0; }
