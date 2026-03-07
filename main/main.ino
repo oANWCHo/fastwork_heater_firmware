@@ -524,10 +524,27 @@ void TaskMAX(void* pvParameters) {
             prev_fault_state[i] = is_fault ? 1 : 0;
             
             if (is_fault) {
-              // [BUG1 FIX] Global stop เฉพาะเมื่อ heater ตัวที่ fault นั้น active อยู่
-              // ถ้า heater ตัวนั้น OFF อยู่แล้ว → ไม่ต้องทำอะไร (แค่ไม่ได้เสียบสาย)
-              if (config.heater_active[i] && has_go_to) {
-                config.heater_active[i] = false;  // ปิดตัวที่ fault
+              // --- [แก้ไข BUG] ตรวจสอบว่า Heater นั้นกำลังถูกใช้งานในโหมดปัจจุบันจริงๆ หรือไม่ ---
+              bool is_really_active = false;
+              if (i == 0) {
+                // Heater 1 ถูกใช้งานใน Auto, Preset และ Manual (ถ้าเปิดไว้)
+                if (sysState.auto_was_started || sysState.preset_running) {
+                  is_really_active = true;
+                } else {
+                  is_really_active = config.heater_active[0];
+                }
+              } else {
+                // Heater 2 และ 3 ถูกใช้งานเฉพาะในโหมด Manual เท่านั้น!
+                if (sysState.auto_was_started || sysState.preset_running) {
+                  is_really_active = false; // บังคับปิดไปเลย ถ้าอยู่ในโหมดอื่น
+                } else {
+                  is_really_active = config.heater_active[i];
+                }
+              }
+
+              // [BUG1 FIX] Global stop เฉพาะเมื่อ heater ตัวที่ fault นั้น "กำลังถูกใช้งานจริงๆ"
+              if (is_really_active && has_go_to) {
+                config.heater_active[i] = false; // ปิดตัวที่ fault
 
                 // หยุดทั้งระบบทันที + ปิด heater ทุกตัว
                 has_go_to = false;
@@ -535,7 +552,6 @@ void TaskMAX(void* pvParameters) {
                 sysState.auto_was_started = false;
                 sysState.preset_running = false;
                 sysState.auto_step = 0;
-
                 for (int h = 0; h < 3; h++) {
                   config.heater_active[h] = false;
                 }
