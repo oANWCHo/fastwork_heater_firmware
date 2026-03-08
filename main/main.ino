@@ -711,7 +711,34 @@ void TaskHeater1Control(void* pvParameters) {
         is_active = false;
       }
     }
-    // [BUG1 FIX] ถ้า Heater 1 active แต่ sensor NaN → หยุดทั้งระบบทันที
+    // [NC=OFF] ถ้า Heater มี sensor fault (NC) → treat เหมือน OFF เลย ไม่ต้องรัน PID
+    // UI ยังแสดง "NC" เหมือนเดิม แต่ logic ไม่พยายาม heat → ไม่ trigger emergency stop
+    {
+      bool sensor_faulted = false;
+      if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+        sensor_faulted = (sysState.tc_faults[HEATER_IDX] != 0);
+        xSemaphoreGive(dataMutex);
+      }
+      if (sensor_faulted && is_active) {
+        is_active = false;
+        // Auto/Preset mode ใช้ Heater1 เป็นหลัก → ถ้า NC ต้องหยุดโหมดนั้น
+        if (auto_is_running || (local_preset_running && has_go_to)) {
+          if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+            has_go_to = false;
+            sysState.preset_was_started = false;
+            sysState.auto_was_started = false;
+            sysState.preset_running = false;
+            sysState.auto_step = 0;
+            xSemaphoreGive(dataMutex);
+          }
+          beep_mode = 3;
+          beep_queue = 6;
+          Serial.printf("[NC=OFF] Heater%d NC while Auto/Preset → mode stopped\n", HEATER_IDX+1);
+        }
+      }
+    }
+
+    // [BUG1 FIX] ถ้า Heater 1 active แต่ sensor NaN (ไม่ใช่ fault ที่รู้จัก) → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
       is_active = false;
@@ -991,6 +1018,21 @@ void TaskHeater2Control(void* pvParameters) {
     } else if (!local_preset_started) {
       is_active = false;
     }
+
+    // [NC=OFF] ถ้า Heater มี sensor fault (NC) → treat เหมือน OFF เลย
+    {
+      bool sensor_faulted = false;
+      if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+        sensor_faulted = (sysState.tc_faults[HEATER_IDX] != 0);
+        xSemaphoreGive(dataMutex);
+      }
+      if (sensor_faulted && is_active) {
+        is_active = false;
+        config.heater_active[HEATER_IDX] = false;
+        Serial.printf("[NC=OFF] Heater%d NC → deactivated silently\n", HEATER_IDX+1);
+      }
+    }
+
     // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
@@ -1145,6 +1187,21 @@ void TaskHeater3Control(void* pvParameters) {
     } else if (!local_preset_started) {
       is_active = false;
     }
+
+    // [NC=OFF] ถ้า Heater มี sensor fault (NC) → treat เหมือน OFF เลย
+    {
+      bool sensor_faulted = false;
+      if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
+        sensor_faulted = (sysState.tc_faults[HEATER_IDX] != 0);
+        xSemaphoreGive(dataMutex);
+      }
+      if (sensor_faulted && is_active) {
+        is_active = false;
+        config.heater_active[HEATER_IDX] = false;
+        Serial.printf("[NC=OFF] Heater%d NC → deactivated silently\n", HEATER_IDX+1);
+      }
+    }
+
     // [BUG1 FIX] ถ้า Heater นี้ active แต่ sensor NaN → หยุดทั้งระบบทันที
     if (has_go_to && is_active && isnan(current_t)) {
       config.heater_active[HEATER_IDX] = false;
@@ -2079,6 +2136,14 @@ void setupWebServer() {
     request->send(200, "application/json", json);
   });
 
+  // ========== [1c. FAULT LOG CLEAR API] ==========
+  server.on("/api/fault_log_clear", HTTP_POST, [](AsyncWebServerRequest* request) {
+    faultLog.init();
+    for (int i = 0; i < 3; i++) prev_fault_state[i] = 0;
+    Serial.println("[API] Fault log cleared");
+    request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Fault log cleared\"}");
+  });
+
   // ========== [2. MAIN DASHBOARD PAGE] ==========
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     String html = R"rawliteral(
@@ -2416,7 +2481,10 @@ void setupWebServer() {
     
     <!-- Fault History Log -->
     <div class="fault-log-panel">
-      <h3>📋 Fault History</h3>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <h3 style="margin-bottom:0">📋 Fault History</h3>
+        <button id="clearFaultBtn" onclick="clearFaultLog()" style="background:#e74c3c;color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:0.9em;">Clear</button>
+      </div>
       <div id="faultLogContent">
         <div class="fault-log-empty">No faults recorded since boot</div>
       </div>
@@ -2586,6 +2654,16 @@ void setupWebServer() {
       
       // Update timestamp
       document.getElementById('lastUpdate').textContent = 'Updated: ' + new Date().toLocaleTimeString();
+    }
+    
+    function clearFaultLog() {
+      if (!confirm('Clear all fault history?')) return;
+      fetch('/api/fault_log_clear', { method: 'POST' })
+        .then(res => res.json())
+        .then(() => {
+          document.getElementById('faultLogContent').innerHTML = '<div class="fault-log-empty">✅ No faults recorded since boot</div>';
+        })
+        .catch(err => console.error('Clear error:', err));
     }
     
     function fetchData() {
