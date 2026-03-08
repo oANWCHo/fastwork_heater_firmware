@@ -214,7 +214,7 @@ volatile uint32_t freq_input_cnt = 0;
 const int TC_CS_PINS[] = { MAXCS1, MAXCS2, MAXCS3 };
 const int TC_PROBE_PIN = MAXCS4;
 const int NUM_THERMOCOUPLES = 3;
-SPISettings maxSettings(1000000, MSBFIRST, SPI_MODE0);
+SPISettings maxSettings(100000, MSBFIRST, SPI_MODE0);
 
 TFT_eSPI tft = TFT_eSPI();
 Preferences preferences;

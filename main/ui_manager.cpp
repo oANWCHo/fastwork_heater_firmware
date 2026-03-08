@@ -1953,8 +1953,8 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     const char* status_txt = "OFF";
     uint16_t status_col = TFT_DARKGREY;
 
-    if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
-    else if (state.tc_faults[i]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
+    if (state.tc_faults[i]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
+    else if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
     else if (state.heater_cutoff_state[i]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
     else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }  // เทาสำหรับ IN-USE
     else if (state.is_heating_active) { 
