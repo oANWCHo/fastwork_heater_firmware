@@ -424,7 +424,9 @@ void TaskMAX(void* pvParameters) {
         bool is_fault = false;
         uint8_t fault_reason = FAULT_NONE;
 
-        bool hw_fault_active = false;
+        // [MODIFIED] ไม่เช็ค HW fault bit ทั้งหมดแล้ว
+        // เช็คเฉพาะ: สายถอด (OC = bit16 + bit0) และ SPI ผิดปกติ (0x0 / 0xFF)
+        // SCG, SCV, generic HW bit → ข้ามไปเลย ถือว่าปกติ
 
         if (d == 0) {
           is_fault = true;
@@ -432,30 +434,23 @@ void TaskMAX(void* pvParameters) {
         } else if (d == 0xFFFFFFFF) {
           is_fault = true;
           fault_reason = FAULT_SPI_FF;
-        } else if (d & 0x10000) {
-          hw_fault_active = true;
+        } else if ((d & 0x10001) == 0x10001) {
+          // Open Circuit เท่านั้น (Bit 16 = fault flag, Bit 0 = OC)
+          // ใช้ debounce เหมือนเดิม เพื่อไม่ให้ glitch ทำให้ NC ขึ้นพลาด
           if (fault_start_time[i] == 0) {
             fault_start_time[i] = millis();
           }
           if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
             is_fault = true;
-            
-            if (d & 0x01) {
-              fault_reason = FAULT_HW_OC;       // Bit 0 = Open Circuit
-            } else if (d & 0x02) {
-              fault_reason = FAULT_HW_SCG;      // Bit 1 = Short to GND
-            } else if (d & 0x04) {
-              fault_reason = FAULT_HW_SCV;      // Bit 2 = Short to VCC
-            } else {
-              fault_reason = FAULT_HW_BIT;      // หากไม่ตรงกับ 3 อาการบนเลย
-            }
+            fault_reason = FAULT_HW_OC;
           }
         } else {
           fault_start_time[i] = 0;
         }
 
         
-        if (!is_fault && !hw_fault_active) {
+        // [MODIFIED] ไม่มี hw_fault_active แล้ว → เช็คแค่ is_fault
+        if (!is_fault) {
           if (d == prev_raw_data[i]) {
             if ((millis() - task_start_time > STARTUP_GRACE_MS) && 
                 (millis() - last_change_time[i] > STUCK_THRESHOLD_MS)) {
@@ -472,8 +467,8 @@ void TaskMAX(void* pvParameters) {
           raw_temp = NAN;
           ma_count[i] = 0;
           ma_idx[i] = 0;
-        } else if (!hw_fault_active) { 
-          // จะดึงข้อมูลมาใช้ ก็ต่อเมื่อไม่มี HW Fault เท่านั้น
+        } else {
+          // สภาวะปกติ — ดึงอุณหภูมิจาก SPI data
           int32_t v = (d >> 18) & 0x3FFF;
           if (d & 0x80000000) v -= 16384; // [แก้ไข] ใช้ Bit 31 สำหรับ Sign Bit
           raw_temp = v * 0.25f;
@@ -482,11 +477,6 @@ void TaskMAX(void* pvParameters) {
         float final_temp = NAN;
         if (is_fault) {
            // ปล่อยให้ final_temp เป็น NAN
-        } else if (hw_fault_active) {
-           // [หัวใจสำคัญ] ถ้า Hardware ส่งสัญญาณรวนชั่วคราว ให้ดึงค่าเฉลี่ยเดิมมาใช้ไปก่อน ห้ามอัปเดต Buffer ใหม่
-           float sum = 0;
-           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
-           if (ma_count[i] > 0) final_temp = sum / ma_count[i];
         } else {
           // สภาวะปกติ อัปเดต Buffer ตามปกติ
           ma_buffer[i][ma_idx[i]] = raw_temp;
@@ -682,6 +672,10 @@ void TaskHeater1Control(void* pvParameters) {
     bool auto_is_running = (local_auto_started && current_auto_step > 0);
     bool system_run = has_go_to;
 
+    // [ADDED] เก็บ TC temp ไว้ก่อนที่จะถูก override เป็น IR ใน auto mode
+    // ใช้สำหรับ clamp อุณหภูมิ TC ไม่ให้เกิน Max ของ Cycle
+    float tc_temp_raw = current_t;
+
     bool is_active = config.heater_active[HEATER_IDX];
     float target_t = config.target_temps[HEATER_IDX];
     float max_t = config.max_temps[HEATER_IDX];
@@ -774,7 +768,47 @@ void TaskHeater1Control(void* pvParameters) {
     bool is_ready_status = false;
 
     if (has_go_to && is_active && !isnan(current_t)) {
-      if (current_t >= max_t) {
+      // [MODIFIED] Auto mode: ไม่ตัดการทำงาน (cutoff) เมื่อ TC เกิน Max
+      // แต่ให้ clamp อุณหภูมิ TC ไม่เกิน Max ของ Cycle นั้นๆ
+      // ทำงานต่อจนกว่า IR จะถึง setpoint
+      if (auto_is_running && !isnan(tc_temp_raw)) {
+        // Auto mode: PID ยังคงควบคุมตาม IR sensor (current_t = ir1_temp)
+        // แต่ถ้า TC >= Max → บังคับ output = 0 (clamp TC ไม่ให้เกิน Max)
+        // ไม่ set cutoff_active → ระบบไม่หยุด / ไม่แสดง CUTOFF
+        float error = target_t - current_t;
+        uint32_t now = millis();
+        float dt = (pid_last_time[HEATER_IDX] == 0) ? 0.05f : (now - pid_last_time[HEATER_IDX]) / 1000.0f;
+        if (dt > 0.5f) dt = 0.05f;
+        pid_last_time[HEATER_IDX] = now;
+
+        pid_integral[HEATER_IDX] += error * dt;
+        pid_integral[HEATER_IDX] = constrain(pid_integral[HEATER_IDX], -100, 100);
+        float derivative = (dt > 0) ? ((error - pid_prev_error[HEATER_IDX]) / dt) : 0;
+        pid_prev_error[HEATER_IDX] = error;
+        float P = Kp[HEATER_IDX] * error;
+        float I = Ki[HEATER_IDX] * pid_integral[HEATER_IDX];
+        float D = Kd[HEATER_IDX] * derivative;
+        output_percent = P + I + D;
+        output_percent = constrain(output_percent, 0, 100);
+
+        // TC clamp: ถ้า TC temp >= Max ของ Cycle → หยุดจ่ายไฟชั่วคราว
+        // (แต่ไม่ cutoff / ไม่หยุดโหมด — แค่รอให้ TC ลดลงแล้วจ่ายต่อ)
+        if (tc_temp_raw >= max_t) {
+          output_percent = 0.0f;
+          pid_integral[HEATER_IDX] = 0;
+        }
+
+        if (fabs(error) <= READY_THRESHOLD) {
+          if (ready_stable_start == 0) ready_stable_start = millis();
+          if (millis() - ready_stable_start >= READY_HOLD_MS) {
+            is_ready_status = true;
+          }
+        } else {
+          ready_stable_start = 0;
+        }
+      }
+      // Non-auto mode: ยังคง cutoff ปกติเหมือนเดิม
+      else if (current_t >= max_t) {
         cutoff_active = true;
         output_percent = 0.0f;
         pid_integral[HEATER_IDX] = 0;
@@ -812,7 +846,7 @@ void TaskHeater1Control(void* pvParameters) {
       ready_stable_start = 0;
     }
 
-    // Ready beep
+    // Ready beep (Heater 1)
     if (is_ready_status && !prev_ready_state) {
       beep_mode = BEEP_MODE_READY;
       beep_queue = 6;
