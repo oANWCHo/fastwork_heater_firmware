@@ -72,7 +72,7 @@
   // Cycle transition: object removed when temp drops this much from peak
   #define AUTO_DROP_THRESHOLD    30.0f   // °C drop from peak_temp to trigger next cycle
   // Safety: if drop persists longer than this → stop Auto Mode entirely
-  #define AUTO_STOP_TIMEOUT_MS   10000   // 10 seconds — drop sustained = no object, stop
+  // #define AUTO_STOP_TIMEOUT_MS 10000  // [REMOVED] ไม่ใช้แล้ว — Wait mode ไม่มี timeout
 #else
   // Legacy absolute threshold mode
   #define AUTO_ABS_THRESHOLD     40.0f   // °C absolute threshold for cycle change
@@ -621,8 +621,8 @@ void TaskHeater1Control(void* pvParameters) {
   float last_displayed_val = 0;
   bool prev_ready_state = false;
 
-  uint32_t auto_drop_timer = 0;   // Timer: how long peak-drop >= threshold has persisted
-  bool auto_paused = false;        // true = drop detected, heater paused temporarily
+  bool auto_paused = false;        // true = drop detected, Wait mode active
+  float wait_tc_setpoint = NAN;    // [ADDED] TC temp ตอนเข้า Wait — ใช้เป็น setpoint เลี้ยงอุณหภูมิ
 
   uint8_t prev_auto_step = 0;
   uint32_t cycle_start_time = 0;
@@ -865,10 +865,10 @@ void TaskHeater1Control(void* pvParameters) {
     // Logic:
     //   Peak is tracked continuously (not just after Ready).
     //   When peak_temp - control_temp >= DROP_THRESHOLD:
-    //     - Pause heater immediately (auto_paused = true)
-    //     - Start a drop timer
-    //     - If temp recovers (drop < threshold) BEFORE 10s → resume heat + advance cycle
-    //     - If drop persists >= 10s continuously → STOP Auto Mode (no object)
+    //     - Enter WAIT mode (auto_paused = true)
+    //     - Hold TC at the temperature when Wait started (wait_tc_setpoint)
+    //     - If temp recovers (drop < threshold) → resume heat + advance cycle
+    //     - No timeout — Wait indefinitely until object returns
     if (auto_is_running && has_go_to) {
 #if AUTO_CONTROL_SENSOR == 1
       float control_temp = ir1_temp;
@@ -905,40 +905,21 @@ void TaskHeater1Control(void* pvParameters) {
           if (!auto_paused) {
             beep_mode = 1;
             beep_queue = 2; // ดัง "ติ๊ด" สั้น 1 ครั้ง
+            // [MODIFIED] จับ TC temp ตอนเข้า Wait เป็น setpoint สำหรับเลี้ยงอุณหภูมิ
+            wait_tc_setpoint = tc_temp_raw;
+            Serial.printf("[AUTO] Drop detected: peak=%.1f control=%.1f diff=%.1f → WAIT mode (hold TC at %.1f)\n",
+                          peak_temp, control_temp, peak_temp - control_temp, wait_tc_setpoint);
           }
-          // Pause heater immediately
+          // Pause heater (จะถูก override ด้วย Wait PID ใน FINAL OUTPUT section)
           auto_paused = true;
+          // [MODIFIED] ไม่มี 10s timeout แล้ว — รอจนกว่าจะใส่วัตถุกลับ
 
-          // Start or continue timing
-          if (auto_drop_timer == 0) {
-            auto_drop_timer = millis();
-            Serial.printf("[AUTO] Drop detected: peak=%.1f control=%.1f diff=%.1f → Heater PAUSED\n",
-                          peak_temp, control_temp, peak_temp - control_temp);
-          }
-          else if (millis() - auto_drop_timer >= AUTO_STOP_TIMEOUT_MS) {
-            // Drop persisted >= 10 seconds → STOP Auto Mode entirely
-            if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
-              has_go_to = false;
-              sysState.auto_was_started = false;
-              sysState.auto_step = 0;
-              sysState.preset_was_started = false;
-              sysState.preset_running = false;
-              xSemaphoreGive(dataMutex);
-            }
-            beep_mode = 1;   
-            beep_queue = 6;
-            peak_temp = 0;
-            has_reached_target = false;
-            auto_paused = false;
-            auto_drop_timer = 0;
-            cycle_change_debounce = 0;
-            Serial.println("[AUTO] Drop sustained >10s → Auto Mode STOPPED");
-          }
         } else {
           // Temp recovered (drop < threshold)
-          if (auto_drop_timer != 0) {
-            // Was dropping but recovered before 10s → resume heat + advance cycle
+          if (auto_paused) {
+            // วัตถุกลับมาแล้ว → resume heat + advance cycle
             auto_paused = false;
+            wait_tc_setpoint = NAN;  // [ADDED] เลิกเลี้ยง TC — กลับไปคุม IR ปกติ
             
             if (millis() - cycle_change_debounce > 1000) {
               if (current_auto_step < 3) {
@@ -955,7 +936,6 @@ void TaskHeater1Control(void* pvParameters) {
               cycle_change_debounce = millis();
               Serial.printf("[AUTO] Object returned → Heater RESUMED → Cycle %d\n", current_auto_step);
             }
-            auto_drop_timer = 0;
           }
         }
       }
@@ -971,8 +951,8 @@ void TaskHeater1Control(void* pvParameters) {
       peak_temp = 0;
       has_reached_target = false;
       cycle_change_debounce = 0;
-      auto_drop_timer = 0;
       auto_paused = false;
+      wait_tc_setpoint = NAN;
       current_auto_step = 0; 
       prev_auto_step = 0;
     }
@@ -980,8 +960,23 @@ void TaskHeater1Control(void* pvParameters) {
     // (No-object safety is now integrated into cycle transition above)
 
     // === FINAL HEATER OUTPUT (after cycle transition resolves auto_paused) ===
+    // [MODIFIED] Wait mode: เลี้ยง TC ที่ setpoint ตอนเข้า Wait แทนที่จะปิดไฟ
     if (auto_paused && auto_is_running) {
-      output_percent = 0.0f;
+      if (!isnan(wait_tc_setpoint) && !isnan(tc_temp_raw)) {
+        // Mini PID: ควบคุม TC ให้อยู่ที่ wait_tc_setpoint
+        float wait_error = wait_tc_setpoint - tc_temp_raw;
+        float wait_output = Kp[HEATER_IDX] * wait_error;
+        // ใช้แค่ P-control เพื่อความเรียบง่าย — ไม่ต้อง I/D เพราะแค่เลี้ยงอุณหภูมิ
+        wait_output = constrain(wait_output, 0, 100);
+
+        // Safety: ถ้า TC เกิน Max ของ Cycle → ตัดไฟเหมือนกัน
+        if (tc_temp_raw >= max_t) {
+          wait_output = 0.0f;
+        }
+        output_percent = wait_output;
+      } else {
+        output_percent = 0.0f;
+      }
     }
     tpo_set_percent(HEATER_IDX, output_percent);
 
