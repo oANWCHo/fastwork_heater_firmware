@@ -201,6 +201,9 @@ struct SharedData {
   bool preset_running;
   uint8_t preset_index;  // 0-2
   bool preset_mode_enabled;
+  // Raw data for debugging
+  float tc_raw[4];       // Raw temp before MA filter (TC1-3 + Probe)
+  uint32_t tc_spi_raw[4]; // Raw SPI data (for debugging)
 };
 
 SharedData sysState;
@@ -480,7 +483,7 @@ void TaskMAX(void* pvParameters) {
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
-          if (final_temp < 0.0f) final_temp = 0.0f;
+          // Allow negative temps - thermocouples can read below 0°C
         }
 
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
@@ -488,6 +491,8 @@ void TaskMAX(void* pvParameters) {
             sysState.tc_temps[i] = final_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
             sysState.tc_fault_reason[i] = fault_reason;
+            sysState.tc_raw[i] = raw_temp;        // เพิ่มบรรทัดนี้
+            sysState.tc_spi_raw[i] = d;           // เพิ่มบรรทัดนี้
             
             // Log new faults (only when transitioning from OK → FAULT)
             if (is_fault && prev_fault_state[i] == 0) {
@@ -535,6 +540,8 @@ void TaskMAX(void* pvParameters) {
               sysState.tc_probe_temp = final_temp + config.tc_probe_offset;
             }
           }
+          sysState.tc_raw[3] = raw_temp;          // เพิ่มบรรทัดนี้
+          sysState.tc_spi_raw[3] = d;             // เพิ่มบรรทัดนี้
           xSemaphoreGive(dataMutex);
         }
       }
@@ -1793,6 +1800,8 @@ void setupWebServer() {
     float probe_temp = 0, probe_peak = 0;
     uint8_t faults[3] = {0};
     uint8_t fault_reasons[3] = {0};
+    float tc_raw[4] = {0};              // เพิ่มบรรทัดนี้
+    uint32_t tc_spi_raw[4] = {0};       // เพิ่มบรรทัดนี้
     bool cutoff[3] = {false}, ready[3] = {false};
     bool preset_started = false, auto_started = false, preset_running = false;
     uint8_t a_step = 0, preset_idx = 0;
@@ -1807,6 +1816,10 @@ void setupWebServer() {
         cutoff[i] = sysState.heater_cutoff[i];
         ready[i] = sysState.heater_ready[i];
       }
+      for (int i = 0; i < 4; i++) {           // เพิ่มบรรทัดนี้
+        tc_raw[i] = sysState.tc_raw[i];       // เพิ่มบรรทัดนี้
+        tc_spi_raw[i] = sysState.tc_spi_raw[i]; // เพิ่มบรรทัดนี้
+      }                                       // เพิ่มบรรทัดนี้
       for (int i = 0; i < 2; i++) {
         irs[i] = sysState.ir_temps[i];
         ir_amb[i] = sysState.ir_ambient[i];
@@ -1874,6 +1887,22 @@ void setupWebServer() {
     json += "],\"probe\":" + (isnan(probe_temp) ? String("null") : String(probe_temp, 1));
     json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
     json += "},";
+    
+    // Raw Debug Data
+    json += "\"raw_data\":{";
+    json += "\"tc_spi\":[";
+    for (int i = 0; i < 4; i++) {
+      char hex[12];
+      snprintf(hex, sizeof(hex), "\"0x%08X\"", tc_spi_raw[i]);
+      json += String(hex);
+      if (i < 3) json += ",";
+    }
+    json += "],\"tc_raw\":[";
+    for (int i = 0; i < 4; i++) {
+      json += isnan(tc_raw[i]) ? "null" : String(tc_raw[i], 2);
+      if (i < 3) json += ",";
+    }
+    json += "]},";
     
     // Heaters status - with mode-aware target/max
     json += "\"heaters\":[";
@@ -2306,6 +2335,52 @@ void setupWebServer() {
       </div>
     </div>
     
+    <!-- Raw Debug Data Panel -->
+    <div class="card">
+      <h3>🔧 Raw Debug Data</h3>
+      <div style="font-family: 'Courier New', monospace; font-size: 0.85em;">
+        <div class="info-row" style="background: rgba(0,0,0,0.3); padding: 8px; margin: 5px 0;">
+          <span class="info-label">TC1 SPI</span>
+          <span class="info-value" id="raw_spi1" style="color: #0ff;">0x00000000</span>
+        </div>
+        <div class="info-row" style="padding-left: 20px;">
+          <span class="info-label">└─ Raw Temp</span>
+          <span class="info-value" id="raw_temp1">-- °C</span>
+        </div>
+        
+        <div class="info-row" style="background: rgba(0,0,0,0.3); padding: 8px; margin: 5px 0;">
+          <span class="info-label">TC2 SPI</span>
+          <span class="info-value" id="raw_spi2" style="color: #0ff;">0x00000000</span>
+        </div>
+        <div class="info-row" style="padding-left: 20px;">
+          <span class="info-label">└─ Raw Temp</span>
+          <span class="info-value" id="raw_temp2">-- °C</span>
+        </div>
+        
+        <div class="info-row" style="background: rgba(0,0,0,0.3); padding: 8px; margin: 5px 0;">
+          <span class="info-label">TC3 SPI</span>
+          <span class="info-value" id="raw_spi3" style="color: #0ff;">0x00000000</span>
+        </div>
+        <div class="info-row" style="padding-left: 20px;">
+          <span class="info-label">└─ Raw Temp</span>
+          <span class="info-value" id="raw_temp3">-- °C</span>
+        </div>
+        
+        <div class="info-row" style="background: rgba(231,76,60,0.2); padding: 8px; margin: 5px 0; border-left: 3px solid #e74c3c;">
+          <span class="info-label">TC Probe SPI</span>
+          <span class="info-value" id="raw_spi_probe" style="color: #0ff;">0x00000000</span>
+        </div>
+        <div class="info-row" style="padding-left: 20px;">
+          <span class="info-label">└─ Raw Temp</span>
+          <span class="info-value" id="raw_temp_probe">-- °C</span>
+        </div>
+        <div class="info-row" style="padding-left: 20px;">
+          <span class="info-label">└─ Final (w/ offset)</span>
+          <span class="info-value" id="final_temp_probe">-- °C</span>
+        </div>
+      </div>
+    </div>
+    
     <!-- Temperature Chart -->
     <div class="card">
       <h3>📈 Temperature History (Last 60 seconds)</h3>
@@ -2444,6 +2519,17 @@ void setupWebServer() {
       document.getElementById('ir2amb').textContent = (data.temperatures.ir_ambient[1] !== null) ? data.temperatures.ir_ambient[1].toFixed(1) + ' °C' : '--';
       document.getElementById('probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(1) + ' °C' : '--';
       document.getElementById('probePeak').textContent = (data.temperatures.probe_peak !== null) ? data.temperatures.probe_peak.toFixed(1) + ' °C' : '--';
+      
+      // Raw Debug Data
+      if (data.raw_data) {
+        for (let i = 0; i < 3; i++) {
+          document.getElementById('raw_spi' + (i+1)).textContent = data.raw_data.tc_spi[i];
+          document.getElementById('raw_temp' + (i+1)).textContent = (data.raw_data.tc_raw[i] !== null) ? data.raw_data.tc_raw[i].toFixed(2) + ' °C' : '--';
+        }
+        document.getElementById('raw_spi_probe').textContent = data.raw_data.tc_spi[3];
+        document.getElementById('raw_temp_probe').textContent = (data.raw_data.tc_raw[3] !== null) ? data.raw_data.tc_raw[3].toFixed(2) + ' °C' : '--';
+        document.getElementById('final_temp_probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(2) + ' °C' : '--';
+      }
       
       // WiFi
       document.getElementById('wifiRssi').textContent = data.wifi.rssi;
