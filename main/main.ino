@@ -739,7 +739,7 @@ void TaskHeater1Control(void* pvParameters) {
       // current_t = ir1_temp;
       current_t = ir1_temp;
 #endif
-
+      }
 #endif
     }
     // 2. PRESET MODE (only Heater 1)
