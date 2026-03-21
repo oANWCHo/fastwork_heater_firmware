@@ -184,6 +184,7 @@ struct SharedData {
   float displayed_temps[3];
   float tc_probe_temp;
   float tc_probe_peak;
+  float tc_probe_raw;   // Raw SPI reading before MA filter & offset
   float cj_temps[3];
   uint8_t tc_faults[3];
   uint8_t tc_fault_reason[3];   // FaultReason code per channel
@@ -422,11 +423,14 @@ void TaskMAX(void* pvParameters) {
 
         float raw_temp = NAN;
         bool is_fault = false;
+        bool skip_reading = false;  // [NEW] true = fault bit set (SCG/SCV) แต่ไม่ถือเป็น fault จริง — แค่ข้าม temp data
         uint8_t fault_reason = FAULT_NONE;
 
-        // [MODIFIED] ไม่เช็ค HW fault bit ทั้งหมดแล้ว
-        // เช็คเฉพาะ: สายถอด (OC = bit16 + bit0) และ SPI ผิดปกติ (0x0 / 0xFF)
-        // SCG, SCV, generic HW bit → ข้ามไปเลย ถือว่าปกติ
+        // ===== [FAULT DETECTION] =====
+        // 1. SPI bus error (no chip / wiring)
+        // 2. Open Circuit (OC) — debounced → hard fault
+        // 3. SCG / SCV — ไม่ flag fault (ไม่หยุด heater) แต่ข้ามค่า temp
+        //    เพราะ MAX31855 ไม่ update TC data เมื่อ fault bit set → อ่านได้ 0
 
         if (d == 0) {
           is_fault = true;
@@ -434,25 +438,30 @@ void TaskMAX(void* pvParameters) {
         } else if (d == 0xFFFFFFFF) {
           is_fault = true;
           fault_reason = FAULT_SPI_FF;
-        } else if ((d & 0x10001) == 0x10001) {
-          // Open Circuit เท่านั้น (Bit 16 = fault flag, Bit 0 = OC)
-          // ใช้ debounce เหมือนเดิม เพื่อไม่ให้ glitch ทำให้ NC ขึ้นพลาด
-          if (fault_start_time[i] == 0) {
-            fault_start_time[i] = millis();
-          }
-          if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
-            is_fault = true;
-            fault_reason = FAULT_HW_OC;
+        } else if (d & 0x10000) {
+          // Fault bit set — ดูว่าเป็น OC หรือแค่ SCG/SCV
+          if (d & 0x01) {
+            // Open Circuit (Bit 0 = OC) → debounce แล้ว flag fault จริง
+            if (fault_start_time[i] == 0) {
+              fault_start_time[i] = millis();
+            }
+            if (millis() - fault_start_time[i] > FAULT_HOLD_MS) {
+              is_fault = true;
+              fault_reason = FAULT_HW_OC;
+            }
+          } else {
+            // SCG (Bit 1) หรือ SCV (Bit 2) — ไม่ flag fault
+            // แต่ข้ามค่า temp เพราะ MAX31855 ไม่ update TC data เมื่อ fault bit set
+            skip_reading = true;
           }
         } else {
           fault_start_time[i] = 0;
         }
 
-        
-        // [MODIFIED] ไม่มี hw_fault_active แล้ว → เช็คแค่ is_fault
-        if (!is_fault) {
+        // ===== [STUCK DETECTION] =====
+        if (!is_fault && !skip_reading) {
           if (d == prev_raw_data[i]) {
-            if ((millis() - task_start_time > STARTUP_GRACE_MS) && 
+            if (i < 3 && (millis() - task_start_time > STARTUP_GRACE_MS) && 
                 (millis() - last_change_time[i] > STUCK_THRESHOLD_MS)) {
               is_fault = true;
               fault_reason = FAULT_STUCK;
@@ -461,24 +470,43 @@ void TaskMAX(void* pvParameters) {
             prev_raw_data[i] = d;
             last_change_time[i] = millis();
           }
+        } else if (is_fault || skip_reading) {
+          // [FIX] Reset prev_raw_data เมื่อ fault/skip เหมือน version เก่า
+          // ป้องกัน stuck false-positive หลัง fault หาย
+          prev_raw_data[i] = d;
+          last_change_time[i] = millis();
         }
 
+        // ===== [TEMP PARSING & MA BUFFER] =====
         if (is_fault) {
           raw_temp = NAN;
           ma_count[i] = 0;
           ma_idx[i] = 0;
+        } else if (skip_reading) {
+          // SCG/SCV — ไม่ update MA buffer, ใช้ค่าเดิมที่มีอยู่
+          // ถ้ายังไม่เคยมีค่าเลย (ma_count == 0) → ปล่อยให้เป็น NAN
+          raw_temp = NAN;
         } else {
           // สภาวะปกติ — ดึงอุณหภูมิจาก SPI data
           int32_t v = (d >> 18) & 0x3FFF;
-          if (d & 0x80000000) v -= 16384; // [แก้ไข] ใช้ Bit 31 สำหรับ Sign Bit
+          if (d & 0x80000000) v -= 16384;
           raw_temp = v * 0.25f;
         }
 
         float final_temp = NAN;
         if (is_fault) {
-           // ปล่อยให้ final_temp เป็น NAN
+          // Hard fault → NAN
+        } else if (skip_reading) {
+          // SCG/SCV → ใช้ค่าเฉลี่ยเดิมจาก MA buffer (ถ้ามี)
+          if (ma_count[i] > 0) {
+            float sum = 0;
+            for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
+            final_temp = sum / ma_count[i];
+            if (final_temp < 0.0f) final_temp = 0.0f;
+          }
+          // ถ้า ma_count == 0 → final_temp ยังเป็น NAN → แสดง "---"
         } else {
-          // สภาวะปกติ อัปเดต Buffer ตามปกติ
+          // สภาวะปกติ — อัปเดต MA Buffer
           ma_buffer[i][ma_idx[i]] = raw_temp;
           ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
           if (ma_count[i] < MA_WINDOW) ma_count[i]++;
@@ -551,6 +579,8 @@ void TaskMAX(void* pvParameters) {
               }
             }
           } else {
+            // TC Probe (channel index 3)
+            sysState.tc_probe_raw = raw_temp;  // Raw SPI reading before MA & offset
             if (isnan(final_temp)) {
               sysState.tc_probe_temp = NAN;
             } else {
@@ -1805,6 +1835,7 @@ void setup() {
   }
   sysState.tc_probe_temp = NAN;
   sysState.tc_probe_peak = NAN;
+  sysState.tc_probe_raw = NAN;
   sysState.ir_temps[0] = NAN;
   sysState.ir_temps[1] = NAN;
   sysState.ir_ambient[0] = NAN;
@@ -1976,7 +2007,7 @@ void setupWebServer() {
     
     float tcs[3] = {0}, irs[2] = {0}, ir_amb[2] = {0};
     float displayed[3] = {0};
-    float probe_temp = 0, probe_peak = 0;
+    float probe_temp = 0, probe_peak = 0, probe_raw = 0;
     uint8_t faults[3] = {0};
     uint8_t fault_reasons[3] = {0};
     bool cutoff[3] = {false}, ready[3] = {false};
@@ -1999,6 +2030,7 @@ void setupWebServer() {
       }
       probe_temp = sysState.tc_probe_temp;
       probe_peak = sysState.tc_probe_peak;
+      probe_raw = sysState.tc_probe_raw;
       preset_started = sysState.preset_was_started;
       auto_started = sysState.auto_was_started;
       preset_running = sysState.preset_running;
@@ -2059,6 +2091,7 @@ void setupWebServer() {
     }
     json += "],\"probe\":" + (isnan(probe_temp) ? String("null") : String(probe_temp, 1));
     json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
+    json += ",\"probe_raw\":" + (isnan(probe_raw) ? String("null") : String(probe_raw, 1));
     json += "},";
     
     // Heaters status - with mode-aware target/max
@@ -2494,6 +2527,10 @@ void setupWebServer() {
           <span class="info-value" id="probe">-- °C</span>
         </div>
         <div class="info-row">
+          <span class="info-label">Probe Raw</span>
+          <span class="info-value" id="probeRaw" style="color:#888">-- °C</span>
+        </div>
+        <div class="info-row">
           <span class="info-label">Probe Peak</span>
           <span class="info-value" id="probePeak">-- °C</span>
         </div>
@@ -2640,6 +2677,7 @@ void setupWebServer() {
       document.getElementById('ir1amb').textContent = (data.temperatures.ir_ambient[0] !== null) ? data.temperatures.ir_ambient[0].toFixed(1) + ' °C' : '--';
       document.getElementById('ir2amb').textContent = (data.temperatures.ir_ambient[1] !== null) ? data.temperatures.ir_ambient[1].toFixed(1) + ' °C' : '--';
       document.getElementById('probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(1) + ' °C' : '--';
+      document.getElementById('probeRaw').textContent = (data.temperatures.probe_raw !== null) ? data.temperatures.probe_raw.toFixed(1) + ' °C' : '--';
       document.getElementById('probePeak').textContent = (data.temperatures.probe_peak !== null) ? data.temperatures.probe_peak.toFixed(1) + ' °C' : '--';
       
       // WiFi
