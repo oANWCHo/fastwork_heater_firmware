@@ -185,6 +185,7 @@ struct SharedData {
   float tc_probe_temp;
   float tc_probe_peak;
   float tc_probe_raw;   // Raw SPI reading before MA filter & offset
+  float tc_probe_cj;    // Cold Junction (internal) temp of probe MAX31855
   float cj_temps[3];
   uint8_t tc_faults[3];
   uint8_t tc_fault_reason[3];   // FaultReason code per channel
@@ -486,11 +487,32 @@ void TaskMAX(void* pvParameters) {
           // SCG/SCV — ไม่ update MA buffer, ใช้ค่าเดิมที่มีอยู่
           // ถ้ายังไม่เคยมีค่าเลย (ma_count == 0) → ปล่อยให้เป็น NAN
           raw_temp = NAN;
-        } else {
-          // สภาวะปกติ — ดึงอุณหภูมิจาก SPI data
+        }else {
           int32_t v = (d >> 18) & 0x3FFF;
-          if (d & 0x80000000) v -= 16384;
+          
+          // 1. แก้บั๊กการคำนวณ Sign Bit ให้ถูกต้องตาม Data Sheet (ป้องกันอุณหภูมิเพี้ยนเมื่อเกิน 512°C)
+          if (v & 0x2000) {          
+              v |= 0xFFFFC000;       
+          }
           raw_temp = v * 0.25f;
+
+          // 2. Software Trick: หลอกค่าอุณหภูมิที่โดนกวนให้กลับมาเป็นบวก
+          if (raw_temp < 0.0f && raw_temp >= -30.0f) {
+              raw_temp = raw_temp * -1.0f;  // ถ้าอยู่ระหว่าง 0 ถึง -30 ให้คูณ -1 (กลับเป็นบวก)
+          } else if (raw_temp < -30.0f) {
+              raw_temp = 0.0f;              // เผื่อกรณีคลื่นแรงจัดจนร่วงเกิน -30 ให้ล็อกเป็น 0 ทิ้งไปเลย
+          }
+        }
+
+        // ===== [COLD JUNCTION (Internal Temp) PARSING] =====
+        // MAX31855 bits [15:4] = 12-bit signed cold junction temp, resolution 0.0625°C
+        float cj_temp = NAN;
+        if (!is_fault && d != 0 && d != 0xFFFFFFFF) {
+          int32_t cj_raw = (d >> 4) & 0x0FFF;
+          if (cj_raw & 0x0800) {  // Sign bit (bit 11)
+            cj_raw |= 0xFFFFF000;
+          }
+          cj_temp = cj_raw * 0.0625f;
         }
 
         float final_temp = NAN;
@@ -517,9 +539,17 @@ void TaskMAX(void* pvParameters) {
           if (final_temp < 0.0f) final_temp = 0.0f;
         }
 
+        // ===== [CJ FALLBACK] =====
+        // ถ้า TC temp (หลัง MA filter) ต่ำกว่า Cold Junction (Internal) temp
+        // แสดงว่าค่า TC ผิดปกติ (สายกลับขั้ว / noise) → ใช้ CJ temp แทน
+        if (!isnan(final_temp) && !isnan(cj_temp) && final_temp < cj_temp) {
+          final_temp = cj_temp;
+        }
+
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
           if (i < 3) {
             sysState.tc_temps[i] = final_temp;
+            sysState.cj_temps[i] = cj_temp;
             sysState.tc_faults[i] = is_fault ? 1 : 0;
             sysState.tc_fault_reason[i] = fault_reason;
             
@@ -581,6 +611,7 @@ void TaskMAX(void* pvParameters) {
           } else {
             // TC Probe (channel index 3)
             sysState.tc_probe_raw = raw_temp;  // Raw SPI reading before MA & offset
+            sysState.tc_probe_cj = cj_temp;    // Cold Junction of probe
             if (isnan(final_temp)) {
               sysState.tc_probe_temp = NAN;
             } else {
@@ -1836,6 +1867,7 @@ void setup() {
   sysState.tc_probe_temp = NAN;
   sysState.tc_probe_peak = NAN;
   sysState.tc_probe_raw = NAN;
+  sysState.tc_probe_cj = NAN;
   sysState.ir_temps[0] = NAN;
   sysState.ir_temps[1] = NAN;
   sysState.ir_ambient[0] = NAN;
@@ -2007,7 +2039,8 @@ void setupWebServer() {
     
     float tcs[3] = {0}, irs[2] = {0}, ir_amb[2] = {0};
     float displayed[3] = {0};
-    float probe_temp = 0, probe_peak = 0, probe_raw = 0;
+    float cj[3] = {NAN, NAN, NAN};
+    float probe_temp = 0, probe_peak = 0, probe_raw = 0, probe_cj = NAN;
     uint8_t faults[3] = {0};
     uint8_t fault_reasons[3] = {0};
     bool cutoff[3] = {false}, ready[3] = {false};
@@ -2019,6 +2052,7 @@ void setupWebServer() {
       for (int i = 0; i < 3; i++) {
         tcs[i] = sysState.tc_temps[i];
         displayed[i] = sysState.displayed_temps[i];
+        cj[i] = sysState.cj_temps[i];
         faults[i] = sysState.tc_faults[i];
         fault_reasons[i] = sysState.tc_fault_reason[i];
         cutoff[i] = sysState.heater_cutoff[i];
@@ -2031,6 +2065,7 @@ void setupWebServer() {
       probe_temp = sysState.tc_probe_temp;
       probe_peak = sysState.tc_probe_peak;
       probe_raw = sysState.tc_probe_raw;
+      probe_cj = sysState.tc_probe_cj;
       preset_started = sysState.preset_was_started;
       auto_started = sysState.auto_was_started;
       preset_running = sysState.preset_running;
@@ -2092,7 +2127,13 @@ void setupWebServer() {
     json += "],\"probe\":" + (isnan(probe_temp) ? String("null") : String(probe_temp, 1));
     json += ",\"probe_peak\":" + (isnan(probe_peak) ? String("null") : String(probe_peak, 1));
     json += ",\"probe_raw\":" + (isnan(probe_raw) ? String("null") : String(probe_raw, 1));
-    json += "},";
+    json += ",\"probe_cj\":" + (isnan(probe_cj) ? String("null") : String(probe_cj, 2));
+    json += ",\"cj\":[";
+    for (int i = 0; i < 3; i++) {
+      json += isnan(cj[i]) ? "null" : String(cj[i], 2);
+      if (i < 2) json += ",";
+    }
+    json += "]},";
     
     // Heaters status - with mode-aware target/max
     json += "\"heaters\":[";
@@ -2445,6 +2486,10 @@ void setupWebServer() {
           <span class="info-label">Status</span>
           <span class="info-value" id="status1">Inactive</span>
         </div>
+        <div class="info-row">
+          <span class="info-label">CJ (Internal)</span>
+          <span class="info-value" id="cj1" style="color:#888">-- °C</span>
+        </div>
         <div class="info-row fault-reason-row" id="faultRow1" style="display:none">
           <span class="info-label">Fault</span>
           <span class="info-value err" id="faultText1">--</span>
@@ -2469,6 +2514,10 @@ void setupWebServer() {
         <div class="info-row">
           <span class="info-label">Status</span>
           <span class="info-value" id="status2">Inactive</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">CJ (Internal)</span>
+          <span class="info-value" id="cj2" style="color:#888">-- °C</span>
         </div>
         <div class="info-row fault-reason-row" id="faultRow2" style="display:none">
           <span class="info-label">Fault</span>
@@ -2496,6 +2545,10 @@ void setupWebServer() {
         <div class="info-row">
           <span class="info-label">Status</span>
           <span class="info-value" id="status3">Inactive</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">CJ (Internal)</span>
+          <span class="info-value" id="cj3" style="color:#888">-- °C</span>
         </div>
         <div class="info-row fault-reason-row" id="faultRow3" style="display:none">
           <span class="info-label">Fault</span>
@@ -2533,6 +2586,10 @@ void setupWebServer() {
         <div class="info-row">
           <span class="info-label">Probe Peak</span>
           <span class="info-value" id="probePeak">-- °C</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Probe CJ (Internal)</span>
+          <span class="info-value" id="probeCj" style="color:#888">-- °C</span>
         </div>
       </div>
     </div>
@@ -2671,6 +2728,17 @@ void setupWebServer() {
         else { statusEl.textContent = 'Inactive'; statusEl.className = 'info-value'; faultRowEl.style.display = 'none'; }
       });
       
+      // Cold Junction (Internal) temps
+      if (data.temperatures.cj) {
+        for (let i = 0; i < 3; i++) {
+          const cjEl = document.getElementById('cj' + (i + 1));
+          if (cjEl) {
+            const v = data.temperatures.cj[i];
+            cjEl.textContent = (v !== null && v !== undefined) ? v.toFixed(2) + ' °C' : '--';
+          }
+        }
+      }
+      
       // IR sensors
       document.getElementById('ir1').textContent = (data.temperatures.ir[0] !== null) ? data.temperatures.ir[0].toFixed(1) + ' °C' : '--';
       document.getElementById('ir2').textContent = (data.temperatures.ir[1] !== null) ? data.temperatures.ir[1].toFixed(1) + ' °C' : '--';
@@ -2679,6 +2747,7 @@ void setupWebServer() {
       document.getElementById('probe').textContent = (data.temperatures.probe !== null) ? data.temperatures.probe.toFixed(1) + ' °C' : '--';
       document.getElementById('probeRaw').textContent = (data.temperatures.probe_raw !== null) ? data.temperatures.probe_raw.toFixed(1) + ' °C' : '--';
       document.getElementById('probePeak').textContent = (data.temperatures.probe_peak !== null) ? data.temperatures.probe_peak.toFixed(1) + ' °C' : '--';
+      document.getElementById('probeCj').textContent = (data.temperatures.probe_cj !== null && data.temperatures.probe_cj !== undefined) ? data.temperatures.probe_cj.toFixed(2) + ' °C' : '--';
       
       // WiFi
       document.getElementById('wifiRssi').textContent = data.wifi.rssi;
