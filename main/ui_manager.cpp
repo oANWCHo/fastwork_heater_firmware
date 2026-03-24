@@ -307,8 +307,8 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
       }
       break;
     case SCREEN_SLEEP:
-      _spr.fillSprite(C_SET_BG);
-      _spr.setTextColor(C_SET_VALUE_TXT, C_SET_BG);
+      _spr.fillSprite(C_BLACK);                             
+      _spr.setTextColor(C_WHITE, C_BLACK);                  
       _spr.setTextDatum(MC_DATUM);
       _spr.loadFont(Arial18);
       _spr.drawString("ZZZ Sleeping...", _spr.width() / 2, _spr.height() / 2);
