@@ -870,7 +870,7 @@ void TaskHeater1Control(void* pvParameters) {
       }
       // Non-auto mode: ยังคง cutoff ปกติเหมือนเดิม
       else if (current_t >= max_t) {
-        cutoff_active = true;
+        // cutoff_active = true;
         output_percent = 0.0f;
         pid_integral[HEATER_IDX] = 0;
       } else {
@@ -1161,7 +1161,7 @@ void TaskHeater2Control(void* pvParameters) {
 
     if (has_go_to && is_active && !isnan(current_t)) {
       if (current_t >= max_t) {
-        cutoff_active = true;
+        // cutoff_active = true;
         output_percent = 0.0f;
         pid_integral[HEATER_IDX] = 0;
       } else {
@@ -1330,7 +1330,7 @@ void TaskHeater3Control(void* pvParameters) {
 
     if (has_go_to && is_active && !isnan(current_t)) {
       if (current_t >= max_t) {
-        cutoff_active = true;
+        // cutoff_active = true;
         output_percent = 0.0f;
         pid_integral[HEATER_IDX] = 0;
       } else {
