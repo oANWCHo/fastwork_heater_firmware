@@ -1,8 +1,10 @@
 #include "ui_manager.h"
+#include "Arial40.h"
 #include "Arial30.h"
 #include "Arial24.h"
 #include "Arial20.h"
 #include "Arial18.h"
+#include "Arial14.h"
 #include "Arial12.h"
 #include "taskbar_icons.h"
 
@@ -1796,13 +1798,11 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     uint16_t bg_color = (is_active || is_in_use) ? TFT_WHITE : C_CARD_HIGHLIGHT;
     uint16_t border_col = color565(0xD0, 0xE8, 0xD0);  // เขียวอ่อนสำหรับ default border
 
-    // Cursor/selection border ใช้ #09904B แทน TFT_RED
     if (is_editing_this) border_col = C_MANUAL_GREEN;
     else if (is_selected) border_col = C_MANUAL_GREEN;        
     else if (state.tc_faults[0]) border_col = color565(0xD0, 0xE8, 0xD0);
     else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;       
     
-    // NC (fault) ให้ bg เป็นสีเดียวกับ OFF
     if (state.tc_faults[0] && !is_editing_this && !is_selected) {
       bg_color = C_CARD_HIGHLIGHT;
     }
@@ -1818,29 +1818,42 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     int cx = x + (card_w / 2);
     char val_buf[32];
     
-    // Header
-    _spr.loadFont(Arial12);
+    // --- 1. TOP ROW: "HEATER" (Center) & STATUS (Right) ---
+    _spr.loadFont(Arial20);
     _spr.setTextColor(TFT_BLACK, bg_color);
-    _spr.setTextDatum(TC_DATUM);
-    _spr.drawString("HEATER", cx, card_y + 8);
+    _spr.setTextDatum(MC_DATUM); // เปลี่ยนเป็นกึ่งกลาง (MC_DATUM)
+    _spr.drawString("HEATER", cx, card_y + 16); // ใช้ค่า cx เพื่อให้อยู่ตรงกลางกล่องเป๊ะๆ
+
+    // Status Logic
+    const char* status_txt = "OFF";
+    uint16_t status_col = TFT_DARKGREY;
+
+    if (state.tc_faults[0]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
+    else if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
+    else if (state.heater_cutoff_state[0]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
+    else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }
+    else if (state.is_heating_active) { 
+        if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
+        else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
+    } else { status_txt = "STANDBY"; status_col = TFT_BLUE; }
+
+    // เปลี่ยนไปใช้ฟอนต์ Arial18 สำหรับสถานะ (เล็กลง 1 step)
+    _spr.loadFont(Arial14); 
+    _spr.setTextDatum(MR_DATUM);
+    _spr.setTextColor(status_col, bg_color);
+    _spr.drawString(status_txt, x + card_w - 15, card_y + 16);
     
-    // --- Temperature Display ---
+    // วาดจุดสถานะด้านหน้าข้อความ Status
+    int status_w = _spr.textWidth(status_txt);
+    _spr.fillCircle(x + card_w - 15 - status_w - 8, card_y + 16, 4, status_col);
+
+    // --- 2. MIDDLE ROW: Current Temperature (Size 40, Centered) ---
     if (isnan(state.tc_temps[0])) {
       strcpy(val_buf, "---");
     } else {
-      snprintf(val_buf, 20, "%.0f", convertTemp(state.tc_temps[0], state.temp_unit));
+      snprintf(val_buf, 32, "%.0f%c", convertTemp(state.tc_temps[0], state.temp_unit), unit_char);
     }
 
-    _spr.loadFont(Arial30);
-    int val_width = _spr.textWidth(val_buf);
-    int unit_width = _spr.textWidth(unit_str);
-
-    int total_block_width = val_width + 4 + unit_width;
-    int start_x = cx - (total_block_width / 2);
-
-    _spr.loadFont(Arial30);
-    _spr.setTextDatum(TL_DATUM);
-    
     uint16_t temp_color;
     if (!is_active && !is_in_use) {
       temp_color = TFT_DARKGREY;
@@ -1877,15 +1890,13 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
       temp_color = color565(tr, tg, tb);
     }
     
+    _spr.loadFont(Arial40); 
+    _spr.setTextDatum(MC_DATUM); 
     _spr.setTextColor(temp_color, bg_color);
-    _spr.drawString(val_buf, start_x, card_y + 35);
+    _spr.drawString(val_buf, cx, card_y + (card_h / 2)); 
 
-    _spr.loadFont(Arial30);
-    _spr.setTextColor(temp_color, bg_color); 
-    _spr.drawString(unit_str, start_x + val_width + 2, card_y + 35); 
-
-    // --- SET Row ---
-    _spr.loadFont(Arial12);
+    // --- 3. BOTTOM ROW: SET / MAX Target ---
+    _spr.loadFont(Arial20);
     String label_txt = "SET:";
     float val_to_show = config.target_temps[0];
     uint16_t edit_color = TFT_BLACK;
@@ -1896,36 +1907,13 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
         else { label_txt = "MAX >"; val_to_show = config.max_temps[0]; }
     }
 
+    char set_buf[32];
+    snprintf(set_buf, sizeof(set_buf), "%s %.0f%c", label_txt.c_str(), convertTemp(val_to_show, state.temp_unit), unit_char);
+
     _spr.setTextColor(edit_color, bg_color);
-    _spr.setTextDatum(TL_DATUM);
-    _spr.drawString(label_txt, x + 8, card_y + 65);
-    _spr.setTextDatum(TR_DATUM);
-    snprintf(val_buf, 20, "%.0f %c", convertTemp(val_to_show, state.temp_unit), unit_char);
-    _spr.drawString(val_buf, x + card_w - 8, card_y + 65);
+    _spr.setTextDatum(MC_DATUM);
+    _spr.drawString(set_buf, cx, card_y + card_h - 20); 
 
-    // --- PWM Power Bar ---
-    drawPWMBar(&_spr, x + 8, card_y + 82, card_w - 16, 8, state.heater_power[0]);
-
-    // --- Status Row ---
-    const char* status_txt = "OFF";
-    uint16_t status_col = TFT_DARKGREY;
-
-    if (state.tc_faults[0]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
-    else if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
-    else if (state.heater_cutoff_state[0]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
-    else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }
-    else if (state.is_heating_active) { 
-        if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
-        else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
-    } else { status_txt = "IDLE"; status_col = TFT_BLUE; }
-
-    _spr.loadFont(Arial12); 
-    int status_w = 6 + 5 + _spr.textWidth(status_txt); 
-    int s_start_x = cx - (status_w / 2);
-    _spr.fillCircle(s_start_x + 3, card_y + 95, 3, status_col);
-    _spr.setTextDatum(ML_DATUM);
-    _spr.setTextColor(status_col, bg_color);
-    _spr.drawString(status_txt, s_start_x + 11, card_y + 96);
     _spr.unloadFont();
   }
 
@@ -1937,7 +1925,7 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
      int bx = _spr.width() / 2;
      int by = btm_y + (btm_h / 2); // จัดให้อยู่กึ่งกลางแนวตั้ง
 
-     _spr.loadFont(Arial18); 
+     _spr.loadFont(Arial20); 
      _spr.setTextColor(TFT_BLACK, TFT_WHITE);
      _spr.setTextDatum(MC_DATUM); // เปลี่ยนเป็น Middle Center
      
@@ -2141,7 +2129,7 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
      int bx = 6 + btm_w / 2;
      int by = btm_y + (btm_h / 2);
 
-     _spr.loadFont(Arial18); 
+     _spr.loadFont(Arial20); 
      _spr.setTextColor(TFT_BLACK, TFT_WHITE);
      _spr.setTextDatum(MC_DATUM);
      
@@ -2353,7 +2341,7 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
      int bx = _spr.width() / 2;
      int by = btm_y + (btm_h / 2);
 
-     _spr.loadFont(Arial18); 
+     _spr.loadFont(Arial20); 
      _spr.setTextColor(TFT_BLACK, TFT_WHITE); 
      _spr.setTextDatum(MC_DATUM);
      
