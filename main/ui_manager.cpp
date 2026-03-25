@@ -80,7 +80,7 @@ int UIManager::findCharInCharset(char c) {
 
 // --- Menu Labels ---
 const char* menu_item_labels_page_1[MENU_PAGE1_ITEM_COUNT] = {
-  "Max Temp Lock", "Heater Calibration", "IR Emissivity", "TC Probe Cal"
+  "Max Temp Lock", "Heater Calibration", "IR Emissivity"
 };
 
 const char* menu_item_labels_page_2[MENU_PAGE2_ITEM_COUNT] = {
@@ -95,7 +95,7 @@ const char* menu_item_labels_page_3[MENU_PAGE3_ITEM_COUNT] = {
 // Unified settings menu labels (all pages combined)
 const int SETTINGS_TOTAL_ITEMS = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ITEM_COUNT;
 const char* settings_all_labels[] = {
-  "Max Temp Lock", "Heater Calibration", "IR Emissivity", "TC Probe Cal",
+  "Max Temp Lock", "Heater Calibration", "IR Emissivity",
   "Turn off When Idle", "Startup Mode", "Sound", "Temp Unit", "Brightness",
   "WiFi Settings", "About"
 };
@@ -273,20 +273,15 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     _show_cursor = true; 
   }
 
-  // Warning Logic
+  // Warning Logic (Model A: only Heater 1)
   _show_warning = false;
-  for (int i = 0; i < 3; i++) {
-    if (state.heater_cutoff_state[i]) {
-      _show_warning = true;
-      break;
-    }
+  if (state.heater_cutoff_state[0]) {
+    _show_warning = true;
   }
   if (!_show_warning) {
-    for (int i = 0; i < 2; i++) {
-      if (!isnan(state.ir_ambient[i]) && state.ir_ambient[i] > 80.0f) {
-        _show_warning = true;
-        break;
-      }
+    // Model A: Only IR
+    if (!isnan(state.ir_ambient[0]) && state.ir_ambient[0] > 80.0f) {
+      _show_warning = true;
     }
   }
 
@@ -339,7 +334,6 @@ void UIManager::draw(const AppState& state, const ConfigState& config) {
     case SCREEN_SETTINGS_IDLE_OFF: drawSettingsIdleOff(state, config); break;
     case SCREEN_SETTINGS_STARTUP: drawSettingsStartup(state, config); break;
     case SCREEN_SETTINGS_SOUND: drawSettingsSound(state, config); break;
-    case SCREEN_SETTINGS_TC_PROBE_CAL: drawSettingsTCProbeCal(state, config); break;
     case SCREEN_SETTINGS_TEMP_UNIT: drawSettingsTempUnit(state, config); break;
     case SCREEN_SETTINGS_ABOUT: drawSettingsAbout(state); break;
     case SCREEN_SETTINGS_BRIGHTNESS: drawSettingsBrightness(state); break;
@@ -883,12 +877,12 @@ void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState&
   int w = _spr.width() - (2 * X_MARGIN);
   _spr.loadFont(Arial18);
 
-  for (int i = 0; i < 2; i++) {
-    int y = Y_START + (i * ITEM_SPACING);
-    bool sel = (i == _selected_menu_item);
+  // Model A: Only IR
+  {
+    int y = Y_START;
+    bool sel = (_selected_menu_item == 0);
     uint16_t bg = sel ? C_SET_SEL_BG : C_SET_CARD_BG;
     uint16_t txt = sel ? C_SET_SEL_TXT : C_SET_NORM_TXT;
-    if (i == 1 && isnan(state.ir_temps[1]) && !sel) txt = C_SET_VALUE_TXT;
 
     _spr.fillRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, bg);
     if (!sel) _spr.drawRoundRect(X_MARGIN, y, w, ITEM_HEIGHT, 6, C_SET_CARD_BRD);
@@ -896,22 +890,16 @@ void UIManager::drawSettingsEmissivity(const AppState& state, const ConfigState&
     _spr.setTextColor(txt, bg);
     _spr.setTextDatum(MC_DATUM);
     char buf[40];
-    if (i == 0) {
-      if (!isnan(state.ir_temps[0])) {
-        float disp_val = convertTemp(state.ir_temps[0], state.temp_unit);
-        snprintf(buf, 40, "IR1 (%.1f%c): %.2f", disp_val, state.temp_unit, config.ir_emissivity[0]);
-      } else {
-        snprintf(buf, 40, "IR1: Not Connected");
-      }
+    if (!isnan(state.ir_temps[0])) {
+      float disp_val = convertTemp(state.ir_temps[0], state.temp_unit);
+      snprintf(buf, 40, "IR (%.1f%c): %.2f", disp_val, state.temp_unit, config.ir_emissivity[0]);
     } else {
-      float disp_val = convertTemp(state.ir_temps[1], state.temp_unit);
-      if (!isnan(state.ir_temps[1])) snprintf(buf, 40, "IR2 (%.1f%c): %.2f", disp_val, state.temp_unit, config.ir_emissivity[1]);
-      else snprintf(buf, 40, "IR2: Not Connected");
+      snprintf(buf, 40, "IR: Not Connected");
     }
     _spr.drawString(buf, _spr.width() / 2, y + ITEM_HEIGHT / 2);
   }
   _spr.unloadFont();
-  drawSettingsFooter(&_spr, NULL, "Rot: Adjust | Press: Switch | Hold: Back", NULL);
+  drawSettingsFooter(&_spr, NULL, "Rot: Adjust | Hold: Back", NULL);
 }
 
 void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState& config) {
@@ -960,19 +948,21 @@ void UIManager::drawSettingsTCProbeCal(const AppState& state, const ConfigState&
 
 void UIManager::drawSettingsCalibrationSelect(const AppState& state, const ConfigState& config) {
   drawHeader("Heater Calibration");
-  char item_labels[3][30];
+  char item_labels[1][30];
   int start_y = 65;
   int w = _spr.width() - 24;
   int h = 36;
   _spr.loadFont(Arial18);
 
-  for (int i = 0; i < 3; ++i) {
-    int y = start_y + i * 42;
-    bool sel = (i == _selected_menu_item);
+  // Model A: Only Heater
+  {
+    int i = 0;
+    int y = start_y;
+    bool sel = (_selected_menu_item == 0);
     uint16_t bg = sel ? C_SET_SEL_BG : C_SET_CARD_BG;
     uint16_t txt = C_SET_NORM_TXT;
-    float disp_off = convertDelta(config.tc_offsets[i], state.temp_unit);
-    snprintf(item_labels[i], 30, "Heater %d Offset: %.0f%c", i + 1, disp_off, state.temp_unit);
+    float disp_off = convertDelta(config.tc_offsets[0], state.temp_unit);
+    snprintf(item_labels[0], 30, "Heater Offset: %.0f%c", disp_off, state.temp_unit);
 
     if (sel) {
       if (_is_editing_calibration) {
@@ -985,7 +975,7 @@ void UIManager::drawSettingsCalibrationSelect(const AppState& state, const Confi
     if (!sel) _spr.drawRoundRect(12, y, w, h, 6, C_SET_CARD_BRD);
     _spr.setTextDatum(MC_DATUM);
     _spr.setTextColor(txt, bg);
-    _spr.drawString(item_labels[i], _spr.width() / 2, y + h / 2);
+    _spr.drawString(item_labels[0], _spr.width() / 2, y + h / 2);
   }
   _spr.unloadFont();
   drawSettingsFooter(&_spr, NULL, "Rot: Select/Edit | Press: Toggle", NULL);
@@ -1093,12 +1083,9 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
   resetInactivityTimer();
   switch (_current_screen) {
     case SCREEN_MANUAL:
-      if (_manual_selection_nav >= 0 && _manual_selection_nav <= 2) {
-        config.heater_active[_manual_selection_nav] = !config.heater_active[_manual_selection_nav];
-        if (_save_callback) _save_callback(config);
-      } else if (_manual_selection_nav == 5) {
-        openSettings();
-      }
+      // Model A: Only Heater
+      config.heater_active[0] = !config.heater_active[0];
+      if (_save_callback) _save_callback(config);
       return true;
     case SCREEN_QUICK_EDIT:
       if (_quick_edit_step == Q_EDIT_TARGET) _quick_edit_step = Q_EDIT_MAX;
@@ -1136,7 +1123,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       // Unified: _selected_menu_item is global index
       int idx = _selected_menu_item;
       
-      // Page 1 items: 0..3
+      // Page 1 items: 0..2 (Model A: no TC Probe Cal)
       if (idx < MENU_PAGE1_ITEM_COUNT) {
         switch (idx) {
           case MENU_PAGE1_MAX_TEMP_LOCK:
@@ -1149,9 +1136,7 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
             break;
           case MENU_PAGE1_EMISSIVITY:
             _current_screen = SCREEN_SETTINGS_EMISSIVITY;
-            break;
-          case MENU_PAGE1_TC_PROBE_CAL:
-            _current_screen = SCREEN_SETTINGS_TC_PROBE_CAL;
+            _selected_menu_item = 0;  // Model A: only IR
             break;
         }
       }
@@ -1327,13 +1312,6 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
 
     case SCREEN_SETTINGS_WIFI_STATUS: _current_screen = SCREEN_SETTINGS_WIFI_MENU; return true;
 
-    case SCREEN_SETTINGS_TC_PROBE_CAL:
-      if (!isnan(_temp_edit_value)) {
-        if (_selected_menu_item == 0) config.tc_probe_offset = config.tc_probe_offset - _temp_edit_value;
-        else config.tc_probe_offset = 0.0f;
-        if (_save_callback) _save_callback(config);
-      }
-      return true;
     case SCREEN_SETTINGS_HEATER_TARGET_TEMP:
       config.target_temps[_selected_menu_item] = _temp_edit_value;
       if (_save_callback) _save_callback(config);
@@ -1385,8 +1363,10 @@ bool UIManager::handleButtonSingleClick(ConfigState& config, float& go_to, bool&
       _menu_step_accumulator = 0.0f;
       return true;
     case SCREEN_SETTINGS_EMISSIVITY:
-      if (_selected_menu_item == 0) _selected_menu_item = 1;
-      else _selected_menu_item = 0;
+      // Model A: Only IR, press = save & back
+      if (_save_callback) _save_callback(config);
+      _current_screen = SCREEN_SETTINGS_PAGE_1;
+      _selected_menu_item = MENU_PAGE1_EMISSIVITY;
       return true;
     case SCREEN_SETTINGS_TEMP_UNIT:
       config.temp_unit = (_selected_menu_item == 0) ? 'C' : 'F';
@@ -1456,10 +1436,6 @@ bool UIManager::handleButtonHold(ConfigState& config) {
       _current_screen = SCREEN_SETTINGS_PAGE_1;
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_SOUND;
       break;
-    case SCREEN_SETTINGS_TC_PROBE_CAL:
-      _current_screen = SCREEN_SETTINGS_PAGE_1;
-      _selected_menu_item = MENU_PAGE1_TC_PROBE_CAL;
-      break;
     case SCREEN_SETTINGS_ABOUT:
       _current_screen = SCREEN_SETTINGS_PAGE_1;
       _selected_menu_item = MENU_PAGE1_ITEM_COUNT + MENU_PAGE2_ITEM_COUNT + MENU_PAGE3_ABOUT;
@@ -1524,10 +1500,8 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
   switch (_current_screen) {
     case SCREEN_MANUAL:
       {
-        int new_pos = _manual_selection_nav + change;
-        if (new_pos < 0) new_pos = 0;
-        if (new_pos >= 3) new_pos = 2;
-        _manual_selection_nav = new_pos;
+        // Model A: Only Heater - no navigation needed
+        _manual_selection_nav = 0;
         break;
       }
     case SCREEN_AUTO_MODE:
@@ -1644,14 +1618,6 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       }
     case SCREEN_SETTINGS_WIFI_STATUS: break;
 
-    case SCREEN_SETTINGS_TC_PROBE_CAL:
-      {
-        int new_pos = _selected_menu_item + change;
-        if (new_pos < 0) new_pos = 0;
-        if (new_pos > 1) new_pos = 1;
-        _selected_menu_item = new_pos;
-        break;
-      }
     case SCREEN_SETTINGS_CALIBRATION_SELECT:
       {
         if (_is_editing_calibration) {
@@ -1662,10 +1628,8 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
           config.tc_offsets[_selected_menu_item] = val;
           _menu_step_accumulator = 0;
         } else {
-          int new_pos = _selected_menu_item + change;
-          if (new_pos < 0) new_pos = 0;
-          if (new_pos >= 3) new_pos = 2;
-          _selected_menu_item = new_pos;
+          // Model A: Only Heater
+          _selected_menu_item = 0;
         }
         break;
       }
@@ -1697,7 +1661,8 @@ bool UIManager::handleEncoderRotation(float steps, ConfigState& config) {
       }
     case SCREEN_SETTINGS_EMISSIVITY:
       {
-        float* target = &config.ir_emissivity[_selected_menu_item];
+        // Model A: Only IR
+        float* target = &config.ir_emissivity[0];
         *target += (float)change * 0.01f;
         if (*target < 0.01f) *target = 0.01f;
         if (*target > 1.0f) *target = 1.0f;
@@ -1811,17 +1776,18 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
   char unit_char = (state.temp_unit == 'c' || state.temp_unit == 'C') ? 'C' : 'F';
   char unit_str[2] = {unit_char, '\0'};
 
-  // --- Heater Cards ---
+  // --- Heater Card (Model A: Single Heater Only) ---
   int card_y = title_y + 40;
   int card_h = 115; 
   int gap = 6;
-  int card_w = (_spr.width() - (4 * gap)) / 3;
+  int card_w = _spr.width() - (2 * gap);  // Full width for single heater
 
-  for (int i = 0; i < 3; i++) {
-    int x = gap + (i * (card_w + gap));
-    bool is_editing_this = (_current_screen == SCREEN_QUICK_EDIT && i == _manual_selection_nav);
-    bool is_selected = (i == _manual_selection_nav) && (_show_cursor || is_editing_this);
-    bool is_active = config.heater_active[i];
+  {
+    int i = 0;  // Only Heater
+    int x = gap;
+    bool is_editing_this = (_current_screen == SCREEN_QUICK_EDIT && _manual_selection_nav == 0);
+    bool is_selected = (_manual_selection_nav == 0) && (_show_cursor || is_editing_this);
+    bool is_active = config.heater_active[0];
     
     bool system_engaged = state.auto_running_background || state.preset_running;
     bool is_in_use = is_active && system_engaged;
@@ -1833,11 +1799,11 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     // Cursor/selection border ใช้ #09904B แทน TFT_RED
     if (is_editing_this) border_col = C_MANUAL_GREEN;
     else if (is_selected) border_col = C_MANUAL_GREEN;        
-    else if (state.tc_faults[i]) border_col = color565(0xD0, 0xE8, 0xD0);  // NC = เทาเหมือน OFF
+    else if (state.tc_faults[0]) border_col = color565(0xD0, 0xE8, 0xD0);
     else if (is_active || is_in_use) border_col = C_MANUAL_GREEN;       
     
     // NC (fault) ให้ bg เป็นสีเดียวกับ OFF
-    if (state.tc_faults[i] && !is_editing_this && !is_selected) {
+    if (state.tc_faults[0] && !is_editing_this && !is_selected) {
       bg_color = C_CARD_HIGHLIGHT;
     }
     
@@ -1856,66 +1822,56 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     _spr.loadFont(Arial12);
     _spr.setTextColor(TFT_BLACK, bg_color);
     _spr.setTextDatum(TC_DATUM);
-    snprintf(val_buf, 20, "HEATER %d", i + 1);
-    _spr.drawString(val_buf, cx, card_y + 8);
+    _spr.drawString("HEATER", cx, card_y + 8);
     
-    // --- [จุดแก้ไขใหญ่] Logic การจัดวางอุณหภูมิ + หน่วย แบบ Dynamic ---
-    if (isnan(state.tc_temps[i])) {
+    // --- Temperature Display ---
+    if (isnan(state.tc_temps[0])) {
       strcpy(val_buf, "---");
     } else {
-      snprintf(val_buf, 20, "%.0f", convertTemp(state.tc_temps[i], state.temp_unit));
+      snprintf(val_buf, 20, "%.0f", convertTemp(state.tc_temps[0], state.temp_unit));
     }
 
-    // 1. วัดความกว้างตัวเลข (Font ใหญ่)
     _spr.loadFont(Arial30);
     int val_width = _spr.textWidth(val_buf);
-    _spr.loadFont(Arial30);// do not change
     int unit_width = _spr.textWidth(unit_str);
 
-    // 2. คำนวณความกว้างรวม (ตัวเลข + ช่องว่างเล็กน้อย + หน่วย) เพื่อหาจุดเริ่มวาดให้กึ่งกลางกล่องพอดี
     int total_block_width = val_width + 4 + unit_width;
     int start_x = cx - (total_block_width / 2);
 
-    // 3. วาดตัวเลข - ไล่สีตามอุณหภูมิอิงจาก max_temp ของ heater นั้นๆ
-    //    เขียว(เย็น) -> เหลือง(กลาง) -> ส้ม -> แดง(ร้อนเกิน max)
     _spr.loadFont(Arial30);
     _spr.setTextDatum(TL_DATUM);
     
     uint16_t temp_color;
     if (!is_active && !is_in_use) {
       temp_color = TFT_DARKGREY;
-    } else if (state.tc_faults[i]) {
+    } else if (state.tc_faults[0]) {
       temp_color = TFT_DARKGREY;
-    } else if (state.heater_cutoff_state[i]) {
+    } else if (state.heater_cutoff_state[0]) {
       temp_color = TFT_RED;
-    } else if (isnan(state.tc_temps[i])) {
+    } else if (isnan(state.tc_temps[0])) {
       temp_color = TFT_DARKGREY;
     } else {
-      // ไล่สีอิงจาก max temp: 0% = เขียว, 50% = เหลือง, 80% = ส้ม, 100%+ = แดง
-      float max_t = config.max_temps[i];
-      float cur_t = state.tc_temps[i];
+      float max_t = config.max_temps[0];
+      float cur_t = state.tc_temps[0];
       float ratio = (max_t > 0) ? (cur_t / max_t) : 0;
       if (ratio < 0) ratio = 0;
       
       uint8_t tr, tg, tb;
       if (ratio <= 0.5f) {
-        // เขียว -> เหลือง (0% -> 50%)
         float f = ratio / 0.5f;
-        tr = (uint8_t)(0x09 + f * (0xE0 - 0x09));  // 0x09 -> 0xE0
-        tg = (uint8_t)(0x90 + f * (0xC0 - 0x90));  // 0x90 -> 0xC0
+        tr = (uint8_t)(0x09 + f * (0xE0 - 0x09));
+        tg = (uint8_t)(0x90 + f * (0xC0 - 0x90));
         tb = (uint8_t)(0x00);
       } else if (ratio <= 0.85f) {
-        // เหลือง -> ส้ม (50% -> 85%)
         float f = (ratio - 0.5f) / 0.35f;
-        tr = (uint8_t)(0xE0 + f * (0xFF - 0xE0));  // 0xE0 -> 0xFF
-        tg = (uint8_t)(0xC0 - f * (0xC0 - 0x80));  // 0xC0 -> 0x80
+        tr = (uint8_t)(0xE0 + f * (0xFF - 0xE0));
+        tg = (uint8_t)(0xC0 - f * (0xC0 - 0x80));
         tb = 0x00;
       } else {
-        // ส้ม -> แดง (85% -> 100%+)
         float f = (ratio - 0.85f) / 0.15f;
         if (f > 1.0f) f = 1.0f;
         tr = 0xFF;
-        tg = (uint8_t)(0x80 - f * 0x80);  // 0x80 -> 0x00
+        tg = (uint8_t)(0x80 - f * 0x80);
         tb = 0x00;
       }
       temp_color = color565(tr, tg, tb);
@@ -1924,22 +1880,20 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     _spr.setTextColor(temp_color, bg_color);
     _spr.drawString(val_buf, start_x, card_y + 35);
 
-    // 4. วาดหน่วย (Font ใหญ่) ต่อท้ายตัวเลขทันที - ใช้สีเดียวกับตัวเลข
-    _spr.loadFont(Arial30); // do not change
+    _spr.loadFont(Arial30);
     _spr.setTextColor(temp_color, bg_color); 
     _spr.drawString(unit_str, start_x + val_width + 2, card_y + 35); 
-    // --- [จบส่วนแก้ไข Dynamic Alignment] ---
 
     // --- SET Row ---
     _spr.loadFont(Arial12);
     String label_txt = "SET:";
-    float val_to_show = config.target_temps[i];
+    float val_to_show = config.target_temps[0];
     uint16_t edit_color = TFT_BLACK;
 
     if (is_editing_this) {
         edit_color = _blink_state ? TFT_BLUE : C_MANUAL_GREEN;
-        if (_quick_edit_step == Q_EDIT_TARGET) { label_txt = "SET >"; val_to_show = config.target_temps[i]; }
-        else { label_txt = "MAX >"; val_to_show = config.max_temps[i]; }
+        if (_quick_edit_step == Q_EDIT_TARGET) { label_txt = "SET >"; val_to_show = config.target_temps[0]; }
+        else { label_txt = "MAX >"; val_to_show = config.max_temps[0]; }
     }
 
     _spr.setTextColor(edit_color, bg_color);
@@ -1949,16 +1903,19 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     snprintf(val_buf, 20, "%.0f %c", convertTemp(val_to_show, state.temp_unit), unit_char);
     _spr.drawString(val_buf, x + card_w - 8, card_y + 65);
 
+    // --- PWM Power Bar ---
+    drawPWMBar(&_spr, x + 8, card_y + 82, card_w - 16, 8, state.heater_power[0]);
+
     // --- Status Row ---
     const char* status_txt = "OFF";
     uint16_t status_col = TFT_DARKGREY;
 
-    if (state.tc_faults[i]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
+    if (state.tc_faults[0]) { status_txt = "NC"; status_col = TFT_DARKGREY; }
     else if (!is_active) { status_txt = "OFF"; status_col = TFT_DARKGREY; }
-    else if (state.heater_cutoff_state[i]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
-    else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }  // เทาสำหรับ IN-USE
+    else if (state.heater_cutoff_state[0]) { status_txt = "CUTOFF"; status_col = TFT_ORANGE; }
+    else if (is_in_use) { status_txt = "IN-USE"; status_col = TFT_DARKGREY; }
     else if (state.is_heating_active) { 
-        if (state.heater_ready[i]) { status_txt = "READY"; status_col = 0x07E0; }
+        if (state.heater_ready[0]) { status_txt = "READY"; status_col = 0x07E0; }
         else { status_txt = "HEATING"; status_col = TFT_ORANGE; }
     } else { status_txt = "IDLE"; status_col = TFT_BLUE; }
 
@@ -1972,19 +1929,18 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
     _spr.unloadFont();
   }
 
-  // --- Bottom Sensors (White Box) ---
+  // --- Bottom Sensor (Model A: IR Only) ---
   int btm_y = card_y + card_h + 8;
   _spr.fillRoundRect(6, btm_y, _spr.width()-12, _spr.height()-btm_y-4, 5, TFT_WHITE);
-  const char* labels[] = {"IR1", "IR2", "TC Temp", "MAX(5s)"};
-  for(int i=0; i<4; i++) {
-     int bx = 6 + (i * (_spr.width()-12)/4) + ((_spr.width()-12)/8);
+  {
+     int bx = _spr.width() / 2;
      _spr.loadFont(Arial12); 
      _spr.setTextColor(TFT_BLACK, TFT_WHITE);
      _spr.setTextDatum(TC_DATUM);
-     _spr.drawString(labels[i], bx, btm_y + 4);
+     _spr.drawString("IR", bx, btm_y + 4);
      
      _spr.loadFont(Arial18); 
-     float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
+     float val = state.ir_temps[0];
      char vbuf[20];
      if(isnan(val)) {
          strcpy(vbuf, "---"); 
@@ -2174,22 +2130,20 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
     _spr.unloadFont();
   }
 
-  // --- 3. Bottom Sensors Row ---
+  // --- 3. Bottom Sensor Row (Model A: IR Only) ---
   int btm_y = card_y + card_h + 8;
   int btm_w = _spr.width() - 12;
   int btm_h = _spr.height() - btm_y - 4; 
   
   _spr.fillRoundRect(6, btm_y, btm_w, btm_h, 5, TFT_WHITE);
-  const char* labels[] = {"IR1", "IR2", "TC Temp", "MAX(5s)"};
-  
-  for(int i=0; i<4; i++) {
-     int bx = 6 + (i * btm_w/4) + (btm_w/8);
+  {
+     int bx = 6 + btm_w / 2;
      _spr.loadFont(Arial12); 
      _spr.setTextColor(TFT_BLACK, TFT_WHITE);
      _spr.setTextDatum(TC_DATUM);
-     _spr.drawString(labels[i], bx, btm_y + 4);
+     _spr.drawString("IR", bx, btm_y + 4);
      _spr.loadFont(Arial18); 
-     float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
+     float val = state.ir_temps[0];
      if(isnan(val)) strcpy(buf, "---"); 
      else snprintf(buf, 10, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
      
@@ -2241,7 +2195,7 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   _spr.loadFont(Arial12);
   _spr.setTextColor(TFT_BLACK, title_bg);
   _spr.setTextDatum(TR_DATUM);
-  _spr.drawString("HEATER 1", _spr.width() - 10, title_y + 2);
+  _spr.drawString("HEATER", _spr.width() - 10, title_y + 2);
   
   _spr.loadFont(Arial18);
   char buf[40];
@@ -2387,16 +2341,15 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
   _spr.drawString(status_text, _spr.width()/2 + 5, status_y);
   _spr.unloadFont();
 
-  // --- 4. Bottom Sensors ---
+  // --- 4. Bottom Sensor (Model A: IR Only) ---
   int btm_y = _spr.height() - 48; 
   _spr.fillRoundRect(6, btm_y, _spr.width()-12, 42, 5, TFT_WHITE);
-  const char* b_labels[] = {"IR1", "IR2", "TC Temp", "MAX(5s)"};
-  for(int i=0; i<4; i++) {
-     int bx = 6 + (i * (_spr.width()-12)/4) + ((_spr.width()-12)/8);
+  {
+     int bx = _spr.width() / 2;
      _spr.loadFont(Arial12); _spr.setTextColor(TFT_BLACK, TFT_WHITE); _spr.setTextDatum(TC_DATUM);
-     _spr.drawString(b_labels[i], bx, btm_y + 4);
+     _spr.drawString("IR", bx, btm_y + 4);
      _spr.loadFont(Arial18); 
-     float val = (i==0)?state.ir_temps[0] : (i==1)?state.ir_temps[1] : (i==2)?state.tc_probe_temp : state.tc_probe_peak;
+     float val = state.ir_temps[0];
      if(isnan(val)) strcpy(buf, "---"); else snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
      _spr.drawString(buf, bx, btm_y + 22);
   }

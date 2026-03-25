@@ -44,10 +44,10 @@
 #define PCF_INT 21
 
 #define IR1_ADDR 0x10
-#define IR2_ADDR 0x11
+// #define IR2_ADDR 0x11  // Model A: No IR2
 #define SSR_PIN1 42
-#define SSR_PIN2 2
-#define SSR_PIN3 1
+#define SSR_PIN2 2    // Model A: Not used but kept for pin init
+#define SSR_PIN3 1    // Model A: Not used but kept for pin init
 
 #define WINDOW_MS_INIT 1000
 #define ENCODER_DIVIDER 2
@@ -225,7 +225,7 @@ void saveWiFiConfig(const WiFiConfig& wifi);
 UIManager ui(&tft, saveConfig, saveWiFiConfig);
 ConfigState config;
 Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
-Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();
+// Adafruit_MLX90614 mlx2 = Adafruit_MLX90614();  // Model A: No IR2
 Ticker tpo_ticker;
 
 // Global Runtime Vars
@@ -383,7 +383,7 @@ void TaskWiFiManager(void* pvParameters) {
   }
 }
 
-// 1. MAX31855 TASK
+// 1. MAX31855 TASK (Model A: Only TC1, no TC Probe)
 void TaskMAX(void* pvParameters) {
   const TickType_t xFrequency = pdMS_TO_TICKS(100);
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -397,7 +397,7 @@ void TaskMAX(void* pvParameters) {
   const uint32_t STUCK_THRESHOLD_MS = 2000;
   static uint32_t fault_start_time[4] = { 0, 0, 0, 0 };
   const uint32_t FAULT_HOLD_MS = 500;
-  const uint32_t STARTUP_GRACE_MS = 5000;  // ไม่เช็ค stuck detection ช่วง 5 วินาทีแรก
+  const uint32_t STARTUP_GRACE_MS = 5000;
   uint32_t task_start_time = millis();
 
   SPIClass* vspi = new SPIClass(VSPI);
@@ -414,9 +414,10 @@ void TaskMAX(void* pvParameters) {
       digitalWrite(TFT_CS, HIGH);
       vspi->beginTransaction(maxSettings);
 
-      for (int i = 0; i < 4; i++) {
+      // Model A: Only read TC1 (index 0)
+      for (int i = 0; i < 1; i++) {
         uint32_t d = 0;
-        int cs_pin = (i < 3) ? TC_CS_PINS[i] : TC_PROBE_PIN;
+        int cs_pin = TC_CS_PINS[i];
 
         digitalWrite(cs_pin, LOW);
         d = vspi->transfer32(0);
@@ -424,14 +425,8 @@ void TaskMAX(void* pvParameters) {
 
         float raw_temp = NAN;
         bool is_fault = false;
-        bool skip_reading = false;  // [NEW] true = fault bit set (SCG/SCV) แต่ไม่ถือเป็น fault จริง — แค่ข้าม temp data
+        bool skip_reading = false;
         uint8_t fault_reason = FAULT_NONE;
-
-        // ===== [FAULT DETECTION] =====
-        // 1. SPI bus error (no chip / wiring)
-        // 2. Open Circuit (OC) — debounced → hard fault
-        // 3. SCG / SCV — ไม่ flag fault (ไม่หยุด heater) แต่ข้ามค่า temp
-        //    เพราะ MAX31855 ไม่ update TC data เมื่อ fault bit set → อ่านได้ 0
 
         if (d == 0) {
           is_fault = true;
@@ -440,9 +435,7 @@ void TaskMAX(void* pvParameters) {
           is_fault = true;
           fault_reason = FAULT_SPI_FF;
         } else if (d & 0x10000) {
-          // Fault bit set — ดูว่าเป็น OC หรือแค่ SCG/SCV
           if (d & 0x01) {
-            // Open Circuit (Bit 0 = OC) → debounce แล้ว flag fault จริง
             if (fault_start_time[i] == 0) {
               fault_start_time[i] = millis();
             }
@@ -451,18 +444,15 @@ void TaskMAX(void* pvParameters) {
               fault_reason = FAULT_HW_OC;
             }
           } else {
-            // SCG (Bit 1) หรือ SCV (Bit 2) — ไม่ flag fault
-            // แต่ข้ามค่า temp เพราะ MAX31855 ไม่ update TC data เมื่อ fault bit set
             skip_reading = true;
           }
         } else {
           fault_start_time[i] = 0;
         }
 
-        // ===== [STUCK DETECTION] =====
         if (!is_fault && !skip_reading) {
           if (d == prev_raw_data[i]) {
-            if (i < 3 && (millis() - task_start_time > STARTUP_GRACE_MS) && 
+            if ((millis() - task_start_time > STARTUP_GRACE_MS) && 
                 (millis() - last_change_time[i] > STUCK_THRESHOLD_MS)) {
               is_fault = true;
               fault_reason = FAULT_STUCK;
@@ -472,44 +462,33 @@ void TaskMAX(void* pvParameters) {
             last_change_time[i] = millis();
           }
         } else if (is_fault || skip_reading) {
-          // [FIX] Reset prev_raw_data เมื่อ fault/skip เหมือน version เก่า
-          // ป้องกัน stuck false-positive หลัง fault หาย
           prev_raw_data[i] = d;
           last_change_time[i] = millis();
         }
 
-        // ===== [TEMP PARSING & MA BUFFER] =====
         if (is_fault) {
           raw_temp = NAN;
           ma_count[i] = 0;
           ma_idx[i] = 0;
         } else if (skip_reading) {
-          // SCG/SCV — ไม่ update MA buffer, ใช้ค่าเดิมที่มีอยู่
-          // ถ้ายังไม่เคยมีค่าเลย (ma_count == 0) → ปล่อยให้เป็น NAN
           raw_temp = NAN;
-        }else {
+        } else {
           int32_t v = (d >> 18) & 0x3FFF;
-          
-          // 1. แก้บั๊กการคำนวณ Sign Bit ให้ถูกต้องตาม Data Sheet (ป้องกันอุณหภูมิเพี้ยนเมื่อเกิน 512°C)
           if (v & 0x2000) {          
               v |= 0xFFFFC000;       
           }
           raw_temp = v * 0.25f;
-
-          // 2. Software Trick: หลอกค่าอุณหภูมิที่โดนกวนให้กลับมาเป็นบวก
           if (raw_temp < 0.0f && raw_temp >= -30.0f) {
-              raw_temp = raw_temp * -1.0f;  // ถ้าอยู่ระหว่าง 0 ถึง -30 ให้คูณ -1 (กลับเป็นบวก)
+              raw_temp = raw_temp * -1.0f;
           } else if (raw_temp < -30.0f) {
-              raw_temp = 0.0f;              // เผื่อกรณีคลื่นแรงจัดจนร่วงเกิน -30 ให้ล็อกเป็น 0 ทิ้งไปเลย
+              raw_temp = 0.0f;
           }
         }
 
-        // ===== [COLD JUNCTION (Internal Temp) PARSING] =====
-        // MAX31855 bits [15:4] = 12-bit signed cold junction temp, resolution 0.0625°C
         float cj_temp = NAN;
         if (!is_fault && d != 0 && d != 0xFFFFFFFF) {
           int32_t cj_raw = (d >> 4) & 0x0FFF;
-          if (cj_raw & 0x0800) {  // Sign bit (bit 11)
+          if (cj_raw & 0x0800) {
             cj_raw |= 0xFFFFF000;
           }
           cj_temp = cj_raw * 0.0625f;
@@ -517,107 +496,77 @@ void TaskMAX(void* pvParameters) {
 
         float final_temp = NAN;
         if (is_fault) {
-          // Hard fault → NAN
+          // Hard fault
         } else if (skip_reading) {
-          // SCG/SCV → ใช้ค่าเฉลี่ยเดิมจาก MA buffer (ถ้ามี)
           if (ma_count[i] > 0) {
             float sum = 0;
             for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
             final_temp = sum / ma_count[i];
             if (final_temp < 0.0f) final_temp = 0.0f;
           }
-          // ถ้า ma_count == 0 → final_temp ยังเป็น NAN → แสดง "---"
         } else {
-          // สภาวะปกติ — อัปเดต MA Buffer
           ma_buffer[i][ma_idx[i]] = raw_temp;
           ma_idx[i] = (ma_idx[i] + 1) % MA_WINDOW;
           if (ma_count[i] < MA_WINDOW) ma_count[i]++;
-
           float sum = 0;
           for (int k = 0; k < ma_count[i]; k++) sum += ma_buffer[i][k];
           final_temp = sum / ma_count[i];
           if (final_temp < 0.0f) final_temp = 0.0f;
         }
 
-        // ===== [CJ FALLBACK] =====
-        // ถ้า TC temp (หลัง MA filter) ต่ำกว่า Cold Junction (Internal) temp
-        // แสดงว่าค่า TC ผิดปกติ (สายกลับขั้ว / noise) → ใช้ CJ temp แทน
         if (!isnan(final_temp) && !isnan(cj_temp) && final_temp < cj_temp) {
           final_temp = cj_temp;
         }
 
         if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
-          if (i < 3) {
-            sysState.tc_temps[i] = final_temp;
-            sysState.cj_temps[i] = cj_temp;
-            sysState.tc_faults[i] = is_fault ? 1 : 0;
-            sysState.tc_fault_reason[i] = fault_reason;
+          sysState.tc_temps[i] = final_temp;
+          sysState.cj_temps[i] = cj_temp;
+          sysState.tc_faults[i] = is_fault ? 1 : 0;
+          sysState.tc_fault_reason[i] = fault_reason;
+          
+          if (is_fault && prev_fault_state[i] == 0) {
+            float log_power = 0;
+            portENTER_CRITICAL(&tpoMux);
+            uint32_t on_t = tpo_on_ticks[i];
+            uint32_t win_t = tpo_window_period_ticks;
+            portEXIT_CRITICAL(&tpoMux);
+            log_power = (win_t > 0) ? (on_t * 100.0f / win_t) : 0;
             
-            // Log new faults (only when transitioning from OK → FAULT)
-            if (is_fault && prev_fault_state[i] == 0) {
-              // Get heater power for log
-              float log_power = 0;
-              portENTER_CRITICAL(&tpoMux);
-              uint32_t on_t = tpo_on_ticks[i];
-              uint32_t win_t = tpo_window_period_ticks;
-              portEXIT_CRITICAL(&tpoMux);
-              log_power = (win_t > 0) ? (on_t * 100.0f / win_t) : 0;
-              
-              faultLog.add(i, fault_reason, final_temp, log_power, getCurrentModeStr());
-              Serial.printf("[FAULT LOG] TC%d: %s | Temp=%.1f | Power=%.0f%% | Mode=%s | t=%lums\n",
-                i+1, faultReasonStr(fault_reason), 
-                isnan(final_temp) ? -1.0f : final_temp,
-                log_power, getCurrentModeStr(), millis());
-            }
-            prev_fault_state[i] = is_fault ? 1 : 0;
-            
-            if (is_fault) {
-              // --- [แก้ไข BUG] ตรวจสอบว่า Heater นั้นกำลังถูกใช้งานในโหมดปัจจุบันจริงๆ หรือไม่ ---
-              bool is_really_active = false;
-              if (i == 0) {
-                // Heater 1 ถูกใช้งานใน Auto, Preset และ Manual (ถ้าเปิดไว้)
-                if (sysState.auto_was_started || sysState.preset_running) {
-                  is_really_active = true;
-                } else {
-                  is_really_active = config.heater_active[0];
-                }
-              } else {
-                // Heater 2 และ 3 ถูกใช้งานเฉพาะในโหมด Manual เท่านั้น!
-                if (sysState.auto_was_started || sysState.preset_running) {
-                  is_really_active = false; // บังคับปิดไปเลย ถ้าอยู่ในโหมดอื่น
-                } else {
-                  is_really_active = config.heater_active[i];
-                }
-              }
-
-              // [BUG1 FIX] Global stop เฉพาะเมื่อ heater ตัวที่ fault นั้น "กำลังถูกใช้งานจริงๆ"
-              if (is_really_active && has_go_to) {
-                config.heater_active[i] = false; // ปิดตัวที่ fault
-
-                // หยุดทั้งระบบทันที + ปิด heater ทุกตัว
-                has_go_to = false;
-                sysState.preset_was_started = false;
-                sysState.auto_was_started = false;
-                sysState.preset_running = false;
-                sysState.auto_step = 0;
-                for (int h = 0; h < 3; h++) {
-                  config.heater_active[h] = false;
-                }
-
-                beep_mode = 3;
-                beep_queue = 10;
-              }
-            }
-          } else {
-            // TC Probe (channel index 3)
-            sysState.tc_probe_raw = raw_temp;  // Raw SPI reading before MA & offset
-            sysState.tc_probe_cj = cj_temp;    // Cold Junction of probe
-            if (isnan(final_temp)) {
-              sysState.tc_probe_temp = NAN;
+            faultLog.add(i, fault_reason, final_temp, log_power, getCurrentModeStr());
+            Serial.printf("[FAULT LOG] TC%d: %s | Temp=%.1f | Power=%.0f%% | Mode=%s | t=%lums\n",
+              i+1, faultReasonStr(fault_reason), 
+              isnan(final_temp) ? -1.0f : final_temp,
+              log_power, getCurrentModeStr(), millis());
+          }
+          prev_fault_state[i] = is_fault ? 1 : 0;
+          
+          if (is_fault) {
+            bool is_really_active = false;
+            if (sysState.auto_was_started || sysState.preset_running) {
+              is_really_active = true;
             } else {
-              sysState.tc_probe_temp = final_temp + config.tc_probe_offset;
+              is_really_active = config.heater_active[0];
+            }
+
+            if (is_really_active && has_go_to) {
+              config.heater_active[0] = false;
+              has_go_to = false;
+              sysState.preset_was_started = false;
+              sysState.auto_was_started = false;
+              sysState.preset_running = false;
+              sysState.auto_step = 0;
+              for (int h = 0; h < 3; h++) {
+                config.heater_active[h] = false;
+              }
+              beep_mode = 3;
+              beep_queue = 10;
             }
           }
+
+          // Model A: No TC Probe — set NAN
+          sysState.tc_probe_temp = NAN;
+          sysState.tc_probe_peak = NAN;
+
           xSemaphoreGive(dataMutex);
         }
       }
@@ -629,24 +578,21 @@ void TaskMAX(void* pvParameters) {
   }
 }
 
-// 2. MLX90614 TASK
+// 2. MLX90614 TASK (Model A: Only IR1)
 void TaskMLX(void* pvParameters) {
   const TickType_t xFrequency = pdMS_TO_TICKS(100);
   TickType_t xLastWakeTime = xTaskGetTickCount();
   for (;;) {
     float ir1_obj = mlx1.readObjectTempC();
     float ir1_amb = mlx1.readAmbientTempC();
-    float ir2_obj = mlx2.readObjectTempC();
-    float ir2_amb = mlx2.readAmbientTempC();
 
     float ir1_corrected = applyEmissivity(ir1_obj, ir1_amb, config.ir_emissivity[0], 0.95f);
-    float ir2_corrected = applyEmissivity(ir2_obj, ir2_amb, config.ir_emissivity[1], 0.95f);
 
     if (xSemaphoreTake(dataMutex, 10) == pdTRUE) {
       sysState.ir_temps[0] = ir1_corrected;
       sysState.ir_ambient[0] = ir1_amb;
-      sysState.ir_temps[1] = ir2_corrected;
-      sysState.ir_ambient[1] = ir2_amb;
+      sysState.ir_temps[1] = NAN;     // Model A: No IR2
+      sysState.ir_ambient[1] = NAN;
       xSemaphoreGive(dataMutex);
     }
     freq_mlx_cnt++;
@@ -1519,12 +1465,8 @@ void TaskInput(void* pvParameters) {
 
                 // --- CASE: START ---
                 if (current == SCREEN_MANUAL) {
-                  // Manual mode ใช้ Heater ตัวไหนก็ได้ → เช็คว่ามี heater active อย่างน้อย 1 ตัว
-                  bool any_heater_ok = false;
-                  for (int h = 0; h < 3; h++) {
-                    if (config.heater_active[h] && sysState.tc_faults[h] == 0) { any_heater_ok = true; break; }
-                  }
-                  if (any_heater_ok) {
+                  // Model A: Only Heater 1
+                  if (config.heater_active[0] && sysState.tc_faults[0] == 0) {
                     sysState.preset_was_started = true;
                     sysState.auto_was_started = false;
                     sysState.auto_step = 0;
@@ -1594,8 +1536,7 @@ void TaskInput(void* pvParameters) {
 
       uint8_t led_out = 0xF0;
       if (config.heater_active[0]) led_out &= ~(1 << 4);
-      if (config.heater_active[1]) led_out &= ~(1 << 5);
-      if (config.heater_active[2]) led_out &= ~(1 << 6);
+      // Model A: Heater 2/3 LEDs always off
       if (has_go_to) led_out &= ~(1 << 7);
 
       Wire.beginTransmission(PCF_ADDR);
@@ -1663,7 +1604,7 @@ void TaskDisplay(void* pvParameters) {
       st.ir_ambient[0] = sysState.ir_ambient[0];
       st.ir_ambient[1] = sysState.ir_ambient[1];
 
-      if (st.ir_ambient[0] > 80.0f || st.ir_ambient[1] > 80.0f) {
+      if (st.ir_ambient[0] > 80.0f) {
         alarm_active = true;
       }
       xSemaphoreGive(dataMutex);
@@ -1723,10 +1664,9 @@ void TaskDebug(void* pvParameters) {
 
       Serial.println("--- [Module Data Log] ---");
       if (xSemaphoreTake(dataMutex, 100) == pdTRUE) {
-        Serial.printf("  TC1: %.2f | TC2: %.2f | TC3: %.2f\n", sysState.tc_temps[0], sysState.tc_temps[1], sysState.tc_temps[2]);
-        Serial.printf("  IR1: Obj %.2f / Amb %.2f | IR2: Obj %.2f / Amb %.2f\n",
-                      sysState.ir_temps[0], sysState.ir_ambient[0],
-                      sysState.ir_temps[1], sysState.ir_ambient[1]);
+        Serial.printf("  TC1: %.2f\n", sysState.tc_temps[0]);
+        Serial.printf("  IR1: Obj %.2f / Amb %.2f\n",
+                      sysState.ir_temps[0], sysState.ir_ambient[0]);
         Serial.printf("  Target: %.2f | Active: %s\n", go_to, has_go_to ? "YES" : "NO");
         Serial.printf("  Auto Step: %d | Auto Started: %s\n", sysState.auto_step, sysState.auto_was_started ? "YES" : "NO");
         xSemaphoreGive(dataMutex);
@@ -1959,7 +1899,7 @@ void setup() {
   Wire.setClock(100000);
 
   mlx1.begin(IR1_ADDR, &Wire);
-  mlx2.begin(IR2_ADDR, &Wire);
+  // mlx2.begin(IR2_ADDR, &Wire);  // Model A: No IR2
 
   setBrightness(config.brightness);
 
@@ -1981,10 +1921,10 @@ void setup() {
   // Core 0: WiFi
   xTaskCreatePinnedToCore(TaskWiFiManager, "WiFiMgr", 4096, NULL, 1, NULL, 0);
 
-  // Core 1: Application
+  // Core 1: Application (Model A: Only Heater 1)
   xTaskCreatePinnedToCore(TaskHeater1Control, "Heater1", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(TaskHeater2Control, "Heater2", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(TaskHeater3Control, "Heater3", 4096, NULL, 3, NULL, 1);
+  // xTaskCreatePinnedToCore(TaskHeater2Control, "Heater2", 4096, NULL, 3, NULL, 1);  // Model A: No Heater 2
+  // xTaskCreatePinnedToCore(TaskHeater3Control, "Heater3", 4096, NULL, 3, NULL, 1);  // Model A: No Heater 3
   xTaskCreatePinnedToCore(TaskMAX, "MAX31855", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskMLX, "MLX90614", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(TaskInput, "Input", 4096, NULL, 2, NULL, 1);
