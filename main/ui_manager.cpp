@@ -1931,23 +1931,24 @@ void UIManager::drawManualScreen(const AppState& state, const ConfigState& confi
 
   // --- Bottom Sensor (Model A: IR Only) ---
   int btm_y = card_y + card_h + 8;
-  _spr.fillRoundRect(6, btm_y, _spr.width()-12, _spr.height()-btm_y-4, 5, TFT_WHITE);
+  int btm_h = _spr.height() - btm_y - 4;
+  _spr.fillRoundRect(6, btm_y, _spr.width()-12, btm_h, 5, TFT_WHITE);
   {
      int bx = _spr.width() / 2;
-     _spr.loadFont(Arial12); 
-     _spr.setTextColor(TFT_BLACK, TFT_WHITE);
-     _spr.setTextDatum(TC_DATUM);
-     _spr.drawString("IR", bx, btm_y + 4);
-     
+     int by = btm_y + (btm_h / 2); // จัดให้อยู่กึ่งกลางแนวตั้ง
+
      _spr.loadFont(Arial18); 
+     _spr.setTextColor(TFT_BLACK, TFT_WHITE);
+     _spr.setTextDatum(MC_DATUM); // เปลี่ยนเป็น Middle Center
+     
      float val = state.ir_temps[0];
-     char vbuf[20];
+     char vbuf[30];
      if(isnan(val)) {
-         strcpy(vbuf, "---"); 
+         strcpy(vbuf, "IR: ---"); 
      } else {
-         snprintf(vbuf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
+         snprintf(vbuf, 30, "IR: %.0f %c", convertTemp(val, state.temp_unit), unit_char);
      }
-     _spr.drawString(vbuf, bx, btm_y + 22);
+     _spr.drawString(vbuf, bx, by);
      _spr.unloadFont();
   }
 }
@@ -2138,16 +2139,19 @@ void UIManager::drawAutoModeScreen(const AppState& state, const ConfigState& con
   _spr.fillRoundRect(6, btm_y, btm_w, btm_h, 5, TFT_WHITE);
   {
      int bx = 6 + btm_w / 2;
-     _spr.loadFont(Arial12); 
-     _spr.setTextColor(TFT_BLACK, TFT_WHITE);
-     _spr.setTextDatum(TC_DATUM);
-     _spr.drawString("IR", bx, btm_y + 4);
+     int by = btm_y + (btm_h / 2);
+
      _spr.loadFont(Arial18); 
-     float val = state.ir_temps[0];
-     if(isnan(val)) strcpy(buf, "---"); 
-     else snprintf(buf, 10, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     _spr.setTextColor(TFT_BLACK, TFT_WHITE);
+     _spr.setTextDatum(MC_DATUM);
      
-     _spr.drawString(buf, bx, btm_y + 22);
+     float val = state.ir_temps[0];
+     if(isnan(val)) {
+         strcpy(buf, "IR: ---"); 
+     } else {
+         snprintf(buf, 30, "IR: %.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     }
+     _spr.drawString(buf, bx, by);
      _spr.unloadFont();
   }
 }
@@ -2343,15 +2347,24 @@ void UIManager::drawPresetModeScreen(const AppState& state, const ConfigState& c
 
   // --- 4. Bottom Sensor (Model A: IR Only) ---
   int btm_y = _spr.height() - 48; 
-  _spr.fillRoundRect(6, btm_y, _spr.width()-12, 42, 5, TFT_WHITE);
+  int btm_h = 42;
+  _spr.fillRoundRect(6, btm_y, _spr.width()-12, btm_h, 5, TFT_WHITE);
   {
      int bx = _spr.width() / 2;
-     _spr.loadFont(Arial12); _spr.setTextColor(TFT_BLACK, TFT_WHITE); _spr.setTextDatum(TC_DATUM);
-     _spr.drawString("IR", bx, btm_y + 4);
+     int by = btm_y + (btm_h / 2);
+
      _spr.loadFont(Arial18); 
+     _spr.setTextColor(TFT_BLACK, TFT_WHITE); 
+     _spr.setTextDatum(MC_DATUM);
+     
      float val = state.ir_temps[0];
-     if(isnan(val)) strcpy(buf, "---"); else snprintf(buf, 20, "%.0f %c", convertTemp(val, state.temp_unit), unit_char);
-     _spr.drawString(buf, bx, btm_y + 22);
+     if(isnan(val)) {
+         strcpy(buf, "IR: ---"); 
+     } else {
+         snprintf(buf, 30, "IR: %.0f %c", convertTemp(val, state.temp_unit), unit_char);
+     }
+     _spr.drawString(buf, bx, by);
+     _spr.unloadFont();
   }
 }
 void UIManager::drawSettingsBrightness(const AppState& state) {
