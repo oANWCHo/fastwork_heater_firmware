@@ -5,7 +5,7 @@
 #define I2C_SCL 9
 
 // Address เดิม (ถ้าไม่เคยเปลี่ยนคือ 0x5A)
-uint8_t oldAddr = 0x5A; 
+uint8_t oldAddr = 0x10; 
 // Address ใหม่ที่ต้องการ (0x10)
 uint8_t newAddr = 0x11;
 
@@ -37,23 +37,37 @@ void loop() {}
 
 // ฟังก์ชันสำหรับเขียน EEPROM พร้อมคำนวณ PEC (CRC-8)
 void writeEEPROM(uint8_t devAddr, uint8_t reg, uint8_t lowByte, uint8_t highByte) {
-  uint8_t pec = calculate_pec(devAddr << 1, reg, lowByte, highByte);
-  
+  // ขั้นตอนการเขียน EEPROM ของ MLX90614:
+  // [Addr_W] [Reg] [Low_Data] [High_Data] [PEC]
+
+  // 1. ลบค่าเดิมก่อน (ส่ง 0x00, 0x00)
+  sendWriteCommand(devAddr, reg, 0x00, 0x00);
+  delay(100); // รอให้ EEPROM ลบเสร็จ
+
+  // 2. เขียนค่าใหม่
+  sendWriteCommand(devAddr, reg, lowByte, highByte);
+  delay(100);
+}
+
+void sendWriteCommand(uint8_t devAddr, uint8_t reg, uint8_t low, uint8_t high) {
+  uint8_t addrW = devAddr << 1;
+  uint8_t data[] = {addrW, reg, low, high};
+  uint8_t pec = crc8(data, 4);
+
   Wire.beginTransmission(devAddr);
   Wire.write(reg);
-  Wire.write(lowByte);
-  Wire.write(highByte);
+  Wire.write(low);
+  Wire.write(high);
   Wire.write(pec);
   Wire.endTransmission();
 }
 
-// ฟังก์ชันคำนวณ Checksum (PEC) ตามมาตรฐาน Melexis
-uint8_t calculate_pec(uint8_t addr, uint8_t reg, uint8_t low, uint8_t high) {
+// CRC-8 สำหรับ MLX90614 (Polynomial 0x07)
+uint8_t crc8(uint8_t *ptr, uint8_t len) {
   uint8_t crc = 0;
-  uint8_t data[] = {addr, reg, low, high};
-  for (int i = 0; i < 4; i++) {
-    crc ^= data[i];
-    for (int j = 0; j < 8; j++) {
+  while (len--) {
+    crc ^= *ptr++;
+    for (uint8_t i = 0; i < 8; i++) {
       if (crc & 0x80) crc = (crc << 1) ^ 0x07;
       else crc <<= 1;
     }
